@@ -160,6 +160,13 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     }
 
     fun saveSettings(newSettings: AppSettings) = viewModelScope.launch { settingsRepository.save(newSettings); reload() }
+    // Individual setters — save immediately without rebuilding the queue. The new values take
+    // effect on the next session / 开始整理 (or immediately for darkMode via theme recomposition).
+    fun setDailyCount(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(dailyCount = v)) }
+    fun setIncludeVideos(v: Boolean) = viewModelScope.launch { settingsRepository.save(settings.value.copy(includeVideos = v)) }
+    fun setIncludeScreenshots(v: Boolean) = viewModelScope.launch { settingsRepository.save(settings.value.copy(includeScreenshots = v)) }
+    fun setReminderHour(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(reminderHour = v)) }
+    fun setDarkMode(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(darkMode = v)) }
     fun nextSession() = viewModelScope.launch { Log.d(TAG, "nextSession() starting"); repository.startNextSession(); Log.d(TAG, "nextSession() calling reload"); reload() }
     suspend fun pendingDeletes() = repository.pendingDeletes()
     fun confirmDeleted(ids: List<Long>) = viewModelScope.launch { Log.d(TAG, "confirmDeleted(${ids.size} photos)"); repository.confirmDeleted(ids) }

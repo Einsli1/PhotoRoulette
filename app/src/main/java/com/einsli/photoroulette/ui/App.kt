@@ -69,11 +69,13 @@ import kotlin.math.roundToInt
     val state by viewModel.ui.collectAsStateWithLifecycle()
     var page by rememberSaveable { mutableIntStateOf(0) }
     var showPicker by remember { mutableStateOf(false) }
-    PhotoRouletteTheme(dark = isSystemInDarkTheme()) {
+    val darkMode = state.settings.darkMode
+    val isDark = when (darkMode) { 1 -> false; 2 -> true; else -> isSystemInDarkTheme() }
+    PhotoRouletteTheme(dark = isDark) {
         Scaffold(bottomBar = { NavigationBar(containerColor = MaterialTheme.colorScheme.background, tonalElevation = 0.dp) { NavigationBarItem(selected = page == 0, onClick = { page = 0 }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }); NavigationBarItem(selected = page == 1, onClick = { page = 1 }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }) } }) { padding ->
             Box(Modifier.padding(padding).fillMaxSize()) {
                 if (page == 0) Home(state, onStart = { viewModel.reload(); page = 2 }, onScan = { showPicker = true }, openTrash = { page = 3 })
-                else if (page == 1) Settings(state.settings, viewModel::saveSettings, viewModel::reset)
+                else if (page == 1) Settings(state.settings, viewModel)
                 else if (page == 3) RecycleBin(viewModel, onRestore = onRestoreFromTrash) { page = 0 }
                 else {
                     val session by viewModel.sessionFlow.collectAsStateWithLifecycle(initialValue = viewModel.sessionFlow.value)
@@ -492,7 +494,43 @@ private fun formatTaken(taken: Long): String =
     }
 }
 
-@Composable private fun Settings(settings: AppSettings, save: (AppSettings) -> Unit, reset: () -> Unit) {
-    var count by remember(settings) { mutableIntStateOf(settings.dailyCount) }; var hour by remember(settings) { mutableIntStateOf(settings.reminderHour) }; var videos by remember(settings) { mutableStateOf(settings.includeVideos) }; var screenshots by remember(settings) { mutableStateOf(settings.includeScreenshots) }
-    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) { Text("设置", style = MaterialTheme.typography.headlineMedium); Text("每次照片数量：$count"); Slider(count.toFloat(), { count = it.roundToInt().coerceIn(5, 50) }, valueRange = 5f..50f, steps = 8); Text("每日提醒：${hour.toString().padStart(2, '0')}:00"); Slider(hour.toFloat(), { hour = it.roundToInt().coerceIn(0, 23) }, valueRange = 0f..23f, steps = 22); Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("包含视频"); Switch(videos, { videos = it }) }; Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("包含截图"); Switch(screenshots, { screenshots = it }) }; Button({ save(settings.copy(dailyCount = count, includeVideos = videos, includeScreenshots = screenshots, reminderHour = hour)) }, Modifier.fillMaxWidth()) { Text("保存设置") }; OutlinedButton(reset, Modifier.fillMaxWidth()) { Text("重置整理记录") } }
+@Composable private fun Settings(settings: AppSettings, vm: PhotoViewModel) = Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+    Text("设置", style = MaterialTheme.typography.headlineMedium)
+
+    // Theme — three options, applies immediately
+    Text("外观", style = MaterialTheme.typography.titleSmall)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val labels = listOf("跟随系统" to 0, "浅色" to 1, "深色" to 2)
+        labels.forEach { (label, mode) ->
+            val selected = settings.darkMode == mode
+            FilterChip(selected = selected, onClick = { vm.setDarkMode(mode) }, label = { Text(label) })
+        }
+    }
+
+    // Daily count — slider, saves on release
+    var count by remember(settings) { mutableIntStateOf(settings.dailyCount) }
+    Text("每次照片数量：$count")
+    Slider(count.toFloat(), { count = it.roundToInt().coerceIn(5, 50) }, valueRange = 5f..50f, steps = 8,
+        onValueChangeFinished = { vm.setDailyCount(count) })
+
+    // Reminder hour
+    var hour by remember(settings) { mutableIntStateOf(settings.reminderHour) }
+    Text("每日提醒：${hour.toString().padStart(2, '0')}:00")
+    Slider(hour.toFloat(), { hour = it.roundToInt().coerceIn(0, 23) }, valueRange = 0f..23f, steps = 22,
+        onValueChangeFinished = { vm.setReminderHour(hour) })
+
+    // Toggles — save immediately
+    var videos by remember(settings) { mutableStateOf(settings.includeVideos) }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text("包含视频")
+        Switch(videos, { videos = it; vm.setIncludeVideos(it) })
+    }
+    var screenshots by remember(settings) { mutableStateOf(settings.includeScreenshots) }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text("包含截图")
+        Switch(screenshots, { screenshots = it; vm.setIncludeScreenshots(it) })
+    }
+
+    Spacer(Modifier.height(12.dp))
+    OutlinedButton(vm::reset, Modifier.fillMaxWidth()) { Text("重置整理记录") }
 }
