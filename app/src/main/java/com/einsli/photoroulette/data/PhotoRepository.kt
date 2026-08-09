@@ -3,6 +3,8 @@ package com.einsli.photoroulette.data
 import com.einsli.photoroulette.media.MediaScanner
 import kotlinx.coroutines.flow.Flow
 
+data class SessionQueue(val position: Int, val queue: List<PhotoEntity>)
+
 class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScanner, private val settings: SettingsRepository) {
     val processedCount: Flow<Int> = dao.processedCount()
     val totalCount: Flow<Int> = dao.totalCount()
@@ -13,16 +15,22 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
     }
 
     suspend fun listAlbums(includeVideos: Boolean = false): List<String> = scanner.listAlbums(includeVideos)
-    suspend fun sessionQueue(config: AppSettings): List<PhotoEntity> {
-        val saved = settings.currentQueue()
-        val resumable = dao.byIds(saved).filter { it.state == PhotoState.UNSEEN || it.state == PhotoState.SKIP }.sortedBy { saved.indexOf(it.mediaId) }
-        if (resumable.isNotEmpty()) return resumable
-        val photos = dao.randomCandidates(config.dailyCount)
-        if (photos.isNotEmpty()) {
-            settings.saveQueue(photos.map { it.mediaId })
+    suspend fun sessionQueue(config: AppSettings): SessionQueue {
+        val (savedIds, savedPos) = settings.currentQueue()
+        if (savedIds.isNotEmpty()) {
+            val all = dao.byIds(savedIds).sortedBy { savedIds.indexOf(it.mediaId) }
+            // Resume only if the saved session still has photos left. A saved position at the
+            // end means the previous session was completed (or the photos were removed from the
+            // gallery); restoring it would leave the home screen with 0 remaining and a dead
+            // "start" button, so start a fresh session instead.
+            if (all.isNotEmpty() && savedPos < all.size) return SessionQueue(savedPos, all)
+            if (all.isNotEmpty()) settings.clearQueue()
         }
-        return photos
+        val photos = dao.randomCandidates(config.dailyCount)
+        if (photos.isNotEmpty()) settings.saveQueue(photos.map { it.mediaId })
+        return SessionQueue(0, photos)
     }
+    suspend fun savePosition(position: Int, queueIds: List<Long>) = settings.saveQueue(queueIds, position)
     suspend fun apply(photo: PhotoEntity, state: PhotoState) = dao.updateState(photo.mediaId, state, if (state == PhotoState.SKIP) null else System.currentTimeMillis())
     suspend fun startNextSession() = settings.clearQueue()
     suspend fun pendingDeletes(): List<PhotoEntity> = dao.pendingDeletes()

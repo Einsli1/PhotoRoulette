@@ -61,7 +61,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             PhotoRouletteApp(
                 viewModel = viewModel,
-                onAction = { mediaId, state, dir -> viewModel.action(mediaId, state, dir) },
+                onAction = { mediaId, state, dir, userTouchedAt -> viewModel.action(mediaId, state, dir, userTouchedAt) },
                 onCommitDeletes = ::movePendingToTrash,
                 onRestoreFromTrash = ::restoreFromSystemTrash
             )

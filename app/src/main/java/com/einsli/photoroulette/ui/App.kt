@@ -24,6 +24,10 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import android.os.SystemClock
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -38,6 +42,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -48,6 +55,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.einsli.photoroulette.PhotoViewModel
 import com.einsli.photoroulette.ReviewSession
@@ -57,20 +65,19 @@ import com.einsli.photoroulette.data.PhotoEntity
 import com.einsli.photoroulette.data.PhotoState
 import kotlin.math.roundToInt
 
-@Composable fun PhotoRouletteApp(viewModel: PhotoViewModel, onAction: (Long, PhotoState, Int) -> Boolean, onCommitDeletes: () -> Unit, onRestoreFromTrash: (List<Long>) -> Unit) {
+@Composable fun PhotoRouletteApp(viewModel: PhotoViewModel, onAction: (Long, PhotoState, Int, Long) -> Boolean, onCommitDeletes: () -> Unit, onRestoreFromTrash: (List<Long>) -> Unit) {
     val state by viewModel.ui.collectAsStateWithLifecycle()
     var page by rememberSaveable { mutableIntStateOf(0) }
     var showPicker by remember { mutableStateOf(false) }
     PhotoRouletteTheme(dark = isSystemInDarkTheme()) {
-        Scaffold(bottomBar = { NavigationBar { NavigationBarItem(selected = page == 0, onClick = { page = 0 }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }); NavigationBarItem(selected = page == 1, onClick = { page = 1 }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }) } }) { padding ->
+        Scaffold(bottomBar = { NavigationBar(containerColor = MaterialTheme.colorScheme.background, tonalElevation = 0.dp) { NavigationBarItem(selected = page == 0, onClick = { page = 0 }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }); NavigationBarItem(selected = page == 1, onClick = { page = 1 }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }) } }) { padding ->
             Box(Modifier.padding(padding).fillMaxSize()) {
                 if (page == 0) Home(state, onStart = { viewModel.reload(); page = 2 }, onScan = { showPicker = true }, openTrash = { page = 3 })
                 else if (page == 1) Settings(state.settings, viewModel::saveSettings, viewModel::reset)
                 else if (page == 3) RecycleBin(viewModel, onRestore = onRestoreFromTrash) { page = 0 }
                 else {
                     val session by viewModel.sessionFlow.collectAsStateWithLifecycle(initialValue = viewModel.sessionFlow.value)
-                    val sessionReady by viewModel.sessionReadyFlow.collectAsStateWithLifecycle(initialValue = viewModel.sessionReadyFlow.value)
-                    Review(session, sessionReady, onAction, onUndo = viewModel::undo, onDone = { onCommitDeletes() })
+                    Review(session, onAction, onUndo = viewModel::undo, onDone = { onCommitDeletes() })
                 }
             }
         }
@@ -307,34 +314,86 @@ import kotlin.math.roundToInt
         Text("本次还有 ${state.remaining} 张", style = MaterialTheme.typography.headlineMedium)
         Text("已整理 ${state.processed} / ${state.total}", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    Spacer(Modifier.height(32.dp)); Button(onStart, Modifier.fillMaxWidth().height(56.dp), enabled = state.remaining > 0 && !state.loading) { Text("开始整理") }
+    Spacer(Modifier.height(32.dp)); Button(onStart, Modifier.fillMaxWidth().height(56.dp), enabled = !state.loading && (state.remaining > 0 || state.session?.queue?.isNotEmpty() == true)) { Text("开始整理") }
     Spacer(Modifier.height(12.dp)); OutlinedButton(onScan, Modifier.fillMaxWidth()) { Text(if (state.total == 0) "扫描相册" else "重新扫描相册") }
     Spacer(Modifier.height(8.dp)); OutlinedButton(onClick = openTrash, Modifier.fillMaxWidth()) { Text("回收站") }
 }
 
-@Composable private fun Review(session: ReviewSession?, sessionReady: Boolean, onAction: (Long, PhotoState, Int) -> Boolean, onUndo: () -> Unit, onDone: () -> Unit) = Column(Modifier.fillMaxSize().padding(16.dp)) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("本次整理", style = MaterialTheme.typography.titleLarge); Row { TextButton(onClick = onUndo, enabled = (session?.position ?: 0) > 0) { Text("上一张") }; Text("剩余 ${session?.remaining ?: 0} / ${session?.queue?.size ?: 0}") } }
-    Spacer(Modifier.height(16.dp))
-    when {
-        // sessionReady is false during the mandatory 400 ms cooldown after a reload, even if
-        // the session has already been populated. This guarantees the spinner is always visible
-        // so the transition from "本次完成" (or an old card) to the new first card is never a
-        // direct jump — the root cause of the "photo auto-jumps after trashing" bug.
-        session == null || !sessionReady -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { CircularProgressIndicator() }
-        session.current == null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("本次完成！", style = MaterialTheme.typography.headlineMedium); Spacer(Modifier.height(16.dp)); Button(onDone) { Text("处理删除并继续整理") } }
-        else -> Box(Modifier.fillMaxWidth().weight(1f)) { SwipePhoto(session, onAction) }
+@Composable private fun Review(session: ReviewSession?, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, onDone: () -> Unit) {
+    // ---- lifecycle-aware cooldown ----
+    // A plain delay() keeps ticking while the activity is paused, so when a session ends and
+    // the system trash confirmation dialog is on top, the cooldown finishes behind it — by the
+    // time the user comes back the new session's first card is already on screen, which reads
+    // as "the photo jumped by itself". Track the lifecycle and hold the gate closed until the
+    // activity is RESUMED again, then require a minimum 400 ms before showing the card.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var resumed by remember { mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            resumed = when (event) {
+                Lifecycle.Event.ON_RESUME -> true
+                Lifecycle.Event.ON_PAUSE -> false
+                else -> resumed
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    // `remember(sessionId)` creates a FRESH MutableState(true) every time the session changes,
+    // so the cooldown gate is closed *synchronously* during composition — zero frames of the new
+    // photo leaking through.
+    val currentId = session?.sessionId
+    val gate = remember(currentId) { mutableStateOf(true) }
+    LaunchedEffect(currentId, resumed) {
+        if (currentId == null) return@LaunchedEffect
+        // Session finished (no photo left): nothing to hide, open immediately.
+        if (session?.current == null) { gate.value = false; return@LaunchedEffect }
+        // A new session arrived while the app was paused (system trash dialog). Keep the
+        // spinner; this effect restarts when ON_RESUME fires and runs the cooldown then.
+        if (!resumed) return@LaunchedEffect
+        delay(400)
+        gate.value = false
+    }
+    // ----------------------------------------------------------------
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("本次整理", style = MaterialTheme.typography.titleLarge); Row { TextButton(onClick = onUndo, enabled = (session?.position ?: 0) > 0) { Text("上一张") }; Text("剩余 ${session?.remaining ?: 0} / ${session?.queue?.size ?: 0}") } }
+        Spacer(Modifier.height(16.dp))
+        when {
+            session == null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { CircularProgressIndicator() }
+            gate.value && session.current != null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { CircularProgressIndicator() }
+            session.current == null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("本次完成！", style = MaterialTheme.typography.headlineMedium); Spacer(Modifier.height(16.dp)); Button(onDone) { Text("处理删除并继续整理") } }
+            else -> Box(Modifier.fillMaxWidth().weight(1f)) { SwipePhoto(session, onAction) }
+        }
     }
 }
 
-@Composable private fun SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int) -> Boolean) {
+private fun formatTaken(taken: Long): String =
+    if (taken <= 0L) "" else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(taken))
+
+@Composable private fun SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int, Long) -> Boolean) {
     val photo = session.current!!
     val swipeThreshold = with(LocalDensity.current) { 120.dp.toPx() }
     val flyOutDistance = with(LocalDensity.current) { 1600.dp.toPx() }
     // [session.lastActionDir] is the direction the PREVIOUS card was swiped (1=right keep,
-    // -1=left delete, 2=down skip, -2=up favorite), kept in the session so it survives
+    // -1=left delete), kept in the session so it survives
     // recomposition. The current card slides IN from the opposite side. On undo the direction
     // is negated — the card re-enters from where it was thrown.
-    Column(Modifier.fillMaxSize()) {
+    // Timestamp of the last real pointer event (drag or tap) in this screen. The MIUI
+    // handwriting/accessibility service injects clicks with NO pointer events, so the
+    // ViewModel can tell real swipes from injected ones by comparing this with cardShownAt.
+    var userTouchedAt by remember { mutableStateOf(0L) }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent()
+                        userTouchedAt = SystemClock.elapsedRealtime()
+                    }
+                }
+            }
+    ) {
         Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
             AnimatedContent(
                 targetState = photo,
@@ -370,23 +429,19 @@ import kotlin.math.roundToInt
                                 x += amount.x; y += amount.y
                             },
                             onDragEnd = {
-                                val horizontal = kotlin.math.abs(x) >= kotlin.math.abs(y)
                                 val dir: Int
                                 val state: PhotoState
                                 when {
-                                    horizontal && x < -swipeThreshold -> { dir = -1; state = PhotoState.DELETE_PENDING }
-                                    horizontal && x > swipeThreshold -> { dir = 1; state = PhotoState.KEEP }
-                                    !horizontal && y < -swipeThreshold -> { dir = -2; state = PhotoState.FAVORITE }
-                                    !horizontal && y > swipeThreshold -> { dir = 2; state = PhotoState.SKIP }
-                                    else -> { dir = 0; state = PhotoState.SKIP }
+                                    x < -swipeThreshold -> { dir = -1; state = PhotoState.DELETE_PENDING }
+                                    x > swipeThreshold -> { dir = 1; state = PhotoState.KEEP }
+                                    else -> { dir = 0; state = PhotoState.KEEP }
                                 }
-                                val accepted = if (dir != 0) onAction(currentPhoto.mediaId, state, dir) else false
+                                val accepted = if (dir != 0) onAction(currentPhoto.mediaId, state, dir, userTouchedAt) else false
                                 if (accepted) {
-                                    val dirX = if (horizontal) if (x < 0f) -1f else 1f else 0f
-                                    val dirY = if (!horizontal) if (y < 0f) -1f else 1f else 0f
+                                    val dirX = if (x < 0f) -1f else 1f
                                     val startX = x; val startY = y
                                     val endX = dirX * flyOutDistance
-                                    val endY = dirY * flyOutDistance
+                                    val endY = 0f
                                     scope.launch {
                                         val start = System.currentTimeMillis()
                                         while (true) {
@@ -418,12 +473,21 @@ import kotlin.math.roundToInt
                     contentScale = ContentScale.Fit
                 )
             }
+            Text(
+                formatTaken(photo.dateTaken),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(12.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.8f))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface
+            )
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FilledTonalButton(onClick = { onAction(photo.mediaId, PhotoState.DELETE_PENDING, -1) }) { Text("删除") }
-            FilledTonalButton(onClick = { onAction(photo.mediaId, PhotoState.SKIP, 2) }) { Text("跳过") }
-            FilledTonalButton(onClick = { onAction(photo.mediaId, PhotoState.FAVORITE, -2) }) { Text("收藏") }
-            Button(onClick = { onAction(photo.mediaId, PhotoState.KEEP, 1) }) { Text("保留") }
+            FilledTonalButton(onClick = { onAction(photo.mediaId, PhotoState.DELETE_PENDING, -1, userTouchedAt) }, Modifier.weight(1f)) { Text("删除") }
+            FilledTonalButton(onClick = { onAction(photo.mediaId, PhotoState.KEEP, 1, userTouchedAt) }, Modifier.weight(1f), colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFFBBFFFF), contentColor = Color(0xFF00382F))) { Text("保留") }
         }
     }
 }

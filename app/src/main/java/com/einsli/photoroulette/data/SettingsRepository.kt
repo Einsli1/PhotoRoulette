@@ -15,7 +15,7 @@ class SettingsRepository(private val context: Context) {
     private object Keys {
         val DAILY = intPreferencesKey("daily_count"); val VIDEO = booleanPreferencesKey("include_videos")
         val SCREENSHOTS = booleanPreferencesKey("include_screenshots"); val HOUR = intPreferencesKey("reminder_hour"); val MINUTE = intPreferencesKey("reminder_minute")
-        val QUEUE_DAY = stringPreferencesKey("queue_day"); val QUEUE_IDS = stringPreferencesKey("queue_ids")
+        val QUEUE_DAY = stringPreferencesKey("queue_day"); val QUEUE_IDS = stringPreferencesKey("queue_ids"); val QUEUE_POS = intPreferencesKey("queue_pos")
         val ALBUMS = stringPreferencesKey("included_albums")
     }
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { p ->
@@ -28,9 +28,13 @@ class SettingsRepository(private val context: Context) {
         p[Keys.HOUR] = settings.reminderHour; p[Keys.MINUTE] = settings.reminderMinute
         p[Keys.ALBUMS] = settings.includedAlbums.joinToString("||")
     }.also { ReminderScheduler.schedule(context, settings.reminderHour, settings.reminderMinute) }
-    suspend fun saveQueue(ids: List<Long>) = context.settingsDataStore.edit { p -> p[Keys.QUEUE_IDS] = ids.joinToString(",") }
-    suspend fun currentQueue(): List<Long> = context.settingsDataStore.data.map { p ->
-        p[Keys.QUEUE_IDS].orEmpty().split(',').mapNotNull { it.toLongOrNull() }
+    suspend fun saveQueue(ids: List<Long>, position: Int = 0) = context.settingsDataStore.edit { p ->
+        p[Keys.QUEUE_IDS] = ids.joinToString(",")
+        p[Keys.QUEUE_POS] = position
+    }
+    suspend fun currentQueue(): Pair<List<Long>, Int> = context.settingsDataStore.data.map { p ->
+        val ids = p[Keys.QUEUE_IDS].orEmpty().split(',').mapNotNull { it.toLongOrNull() }
+        ids to (p[Keys.QUEUE_POS] ?: 0)
     }.let { it.first() }
-    suspend fun clearQueue() = context.settingsDataStore.edit { it.remove(Keys.QUEUE_IDS); it.remove(Keys.QUEUE_DAY) }
+    suspend fun clearQueue() = context.settingsDataStore.edit { it.remove(Keys.QUEUE_IDS); it.remove(Keys.QUEUE_DAY); it.remove(Keys.QUEUE_POS) }
 }
