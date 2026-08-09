@@ -14,3 +14,5 @@ captures/
 .externalNativeBuild/
 .cxx/
 *.hprof
+install_debug.ps1
+push_release.ps1
