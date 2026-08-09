@@ -1,0 +1,6 @@
+<resources>
+    <!-- 将 Photo Roulette 修改为你喜欢的名字 -->
+    <string name="app_name">每日相册</string> 
+    
+    <!-- 其他字符串保持不变 -->
+</resources>
