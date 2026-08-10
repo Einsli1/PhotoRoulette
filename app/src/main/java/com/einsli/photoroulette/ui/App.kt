@@ -71,8 +71,10 @@ import kotlin.math.roundToInt
     var showPicker by remember { mutableStateOf(false) }
     val darkMode = state.settings.darkMode
     val isDark = when (darkMode) { 1 -> false; 2 -> true; else -> isSystemInDarkTheme() }
-    PhotoRouletteTheme(dark = isDark) {
-        Scaffold(bottomBar = { NavigationBar(containerColor = MaterialTheme.colorScheme.background, tonalElevation = 0.dp) { NavigationBarItem(selected = page == 0, onClick = { page = 0 }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }); NavigationBarItem(selected = page == 1, onClick = { page = 1 }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }) } }) { padding ->
+    // Only use wallpaper-based dynamic color when the user hasn't overridden the theme.
+    val useDynamic = darkMode == 0
+    PhotoRouletteTheme(dark = isDark, dynamicColor = useDynamic) {
+        Scaffold(bottomBar = { NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 0.dp) { NavigationBarItem(selected = page == 0, onClick = { page = 0 }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }); NavigationBarItem(selected = page == 1, onClick = { page = 1 }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }) } }) { padding ->
             Box(Modifier.padding(padding).fillMaxSize()) {
                 if (page == 0) Home(state, onStart = { viewModel.reload(); page = 2 }, onScan = { showPicker = true }, openTrash = { page = 3 })
                 else if (page == 1) Settings(state.settings, viewModel)

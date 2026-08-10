@@ -1,7 +1,9 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
+    <color name="ic_launcher_background">#005A4E</color>
     <style name="Theme.PhotoRoulette" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:windowLightStatusBar">?attr/isLightTheme</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowSplashScreenBackground">#005A4E</item>
     </style>
 </resources>
