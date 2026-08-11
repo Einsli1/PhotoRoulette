@@ -81,11 +81,33 @@ class MainActivity : ComponentActivity() {
             viewModel.nextSession()
             return@launch
         }
+        // Validate each URI before calling createTrashRequest — photos may have been
+        // deleted externally, and passing a stale URI to MediaStore throws
+        // IllegalArgumentException ("Invalid Uri") which crashes the app.
+        val valid = photos.filter { photo ->
+            try {
+                contentResolver.query(Uri.parse(photo.uri), null, null, null, null)?.use { it.count > 0 } ?: false
+            } catch (_: Exception) { false }
+        }
+        // Silently remove records for photos that no longer exist on the system.
+        val gone = photos.filter { it !in valid }
+        if (gone.isNotEmpty()) {
+            viewModel.deleteFromTrash(gone.map { it.mediaId })
+        }
+        if (valid.isEmpty()) {
+            // All photos were already gone — no trash dialog needed, continue.
+            viewModel.nextSession()
+            return@launch
+        }
         pendingOp = PendingOp.TRASH
-        pendingIds = photos.map { it.mediaId }
+        pendingIds = valid.map { it.mediaId }
         try {
-            val request = MediaStore.createTrashRequest(contentResolver, photos.map { Uri.parse(it.uri) }, true)
+            val request = MediaStore.createTrashRequest(contentResolver, valid.map { Uri.parse(it.uri) }, true)
             deleteLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+        } catch (e: IllegalArgumentException) {
+            // System still rejected the URIs — confirm locally and move on.
+            viewModel.confirmDeleted(pendingIds)
+            viewModel.nextSession()
         } catch (security: RecoverableSecurityException) {
             deleteLauncher.launch(IntentSenderRequest.Builder(security.userAction.actionIntent.intentSender).build())
         }
@@ -94,11 +116,25 @@ class MainActivity : ComponentActivity() {
     private fun restoreFromSystemTrash(ids: List<Long>) = lifecycleScope.launch {
         val photos = viewModel.trashList().filter { it.mediaId in ids }
         if (photos.isEmpty()) return@launch
+        // Filter out photos whose URIs are no longer valid (deleted externally).
+        val valid = photos.filter { photo ->
+            try {
+                contentResolver.query(Uri.parse(photo.uri), null, null, null, null)?.use { it.count > 0 } ?: false
+            } catch (_: Exception) { false }
+        }
+        if (valid.isEmpty()) {
+            // All selected photos are already gone — just remove them from our DB.
+            viewModel.deleteFromTrash(photos.map { it.mediaId })
+            return@launch
+        }
         pendingOp = PendingOp.RESTORE
-        pendingIds = ids
+        pendingIds = valid.map { it.mediaId }
         try {
-            val request = MediaStore.createTrashRequest(contentResolver, photos.map { Uri.parse(it.uri) }, false)
+            val request = MediaStore.createTrashRequest(contentResolver, valid.map { Uri.parse(it.uri) }, false)
             deleteLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+        } catch (e: IllegalArgumentException) {
+            // URIs rejected — clean up locally.
+            viewModel.deleteFromTrash(pendingIds)
         } catch (security: RecoverableSecurityException) {
             deleteLauncher.launch(IntentSenderRequest.Builder(security.userAction.actionIntent.intentSender).build())
         }
