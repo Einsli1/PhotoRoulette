@@ -11,8 +11,15 @@ interface PhotoDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(items: List<PhotoEntity>)
 
-    @Query("SELECT * FROM photos WHERE state IN ('UNSEEN', 'SKIP') AND inTrash = 0 ORDER BY RANDOM() LIMIT :limit")
-    suspend fun randomCandidates(limit: Int): List<PhotoEntity>
+    // ── candidate selection: strategy (random / oldest / largest) × date range ──
+    @Query("SELECT * FROM photos WHERE state IN ('UNSEEN', 'SKIP') AND inTrash = 0 AND (:minDate IS NULL OR dateTaken >= :minDate) AND (:maxDate IS NULL OR dateTaken < :maxDate) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun randomCandidates(limit: Int, minDate: Long?, maxDate: Long?): List<PhotoEntity>
+
+    @Query("SELECT * FROM photos WHERE state IN ('UNSEEN', 'SKIP') AND inTrash = 0 AND (:minDate IS NULL OR dateTaken >= :minDate) AND (:maxDate IS NULL OR dateTaken < :maxDate) ORDER BY dateTaken ASC LIMIT :limit")
+    suspend fun oldestCandidates(limit: Int, minDate: Long?, maxDate: Long?): List<PhotoEntity>
+
+    @Query("SELECT * FROM photos WHERE state IN ('UNSEEN', 'SKIP') AND inTrash = 0 AND (:minDate IS NULL OR dateTaken >= :minDate) AND (:maxDate IS NULL OR dateTaken < :maxDate) ORDER BY size DESC LIMIT :limit")
+    suspend fun largestCandidates(limit: Int, minDate: Long?, maxDate: Long?): List<PhotoEntity>
 
     @Query("SELECT * FROM photos WHERE mediaId IN (:ids)")
     suspend fun byIds(ids: List<Long>): List<PhotoEntity>
@@ -50,11 +57,41 @@ interface PhotoDao {
     @Query("SELECT COUNT(*) FROM photos WHERE state != 'UNSEEN' AND state != 'SKIP'")
     fun processedCount(): Flow<Int>
 
+    @Query("SELECT COUNT(*) FROM photos WHERE state = 'KEEP'")
+    fun keptCount(): Flow<Int>
+
     @Query("SELECT COUNT(*) FROM photos")
     fun totalCount(): Flow<Int>
 
     @Query("SELECT COUNT(*) FROM photos")
     suspend fun totalNow(): Int
+
+    // Distinct local calendar days on which any photo was processed — used to compute the
+    // current organizing streak.
+    @Query("SELECT DISTINCT substr(date(processedAt / 1000, 'unixepoch', 'localtime'), 1, 10) FROM photos WHERE processedAt IS NOT NULL ORDER BY 1 DESC")
+    fun processedDays(): Flow<List<String>>
+
+    // Total bytes of photos currently sitting in the app's trash (i.e. space the user has
+    // moved out of the gallery).
+    @Query("SELECT COALESCE(SUM(size), 0) FROM photos WHERE inTrash = 1")
+    fun trashBytes(): Flow<Long>
+
+    // Photos that could be "memories" (have a taken date and are not deleted/trashed).
+    @Query("SELECT * FROM photos WHERE inTrash = 0 AND dateTaken > 0 AND state != 'DELETE' ORDER BY dateTaken DESC")
+    fun memoryCandidates(): Flow<List<PhotoEntity>>
+
+    // ── weekly stats ──
+    data class DayCount(val day: String, val cnt: Int)
+
+    @Query("SELECT substr(date(processedAt / 1000, 'unixepoch', 'localtime'), 1, 10) AS day, COUNT(*) AS cnt FROM photos WHERE processedAt IS NOT NULL AND processedAt >= :since GROUP BY day ORDER BY day")
+    fun dayCountsSince(since: Long): Flow<List<DayCount>>
+
+    @Query("SELECT COUNT(*) FROM photos WHERE state = 'KEEP' AND processedAt >= :since")
+    fun weekKept(since: Long): Flow<Int>
+
+    // Photos processed in the window that were not kept went to the trash — those bytes are "freed".
+    @Query("SELECT COALESCE(SUM(size), 0) FROM photos WHERE processedAt >= :since AND processedAt IS NOT NULL AND state != 'KEEP'")
+    fun weekFreedBytes(since: Long): Flow<Long>
 
     @Query("DELETE FROM photos")
     suspend fun clear()

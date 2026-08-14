@@ -1,9 +1,12 @@
 package com.einsli.photoroulette.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.core.view.WindowCompat
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -13,7 +16,9 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,15 +36,20 @@ import java.util.Locale
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
@@ -58,8 +68,8 @@ import androidx.compose.foundation.shape.CircleShape
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.einsli.photoroulette.PhotoViewModel
+import com.einsli.photoroulette.MemoryInfo
 import com.einsli.photoroulette.ReviewSession
-import com.einsli.photoroulette.BuildConfig
 import com.einsli.photoroulette.data.AppSettings
 import com.einsli.photoroulette.data.PhotoEntity
 import com.einsli.photoroulette.data.PhotoState
@@ -73,15 +83,50 @@ import kotlin.math.roundToInt
     val isDark = when (darkMode) { 1 -> false; 2 -> true; else -> isSystemInDarkTheme() }
     // Only use wallpaper-based dynamic color when the user hasn't overridden the theme.
     val useDynamic = darkMode == 0
+    // Keep the system-bar icon color in sync with the *app's* resolved theme (not just the
+    // system's), so the status/navigation bars never show dark icons on a dark page (or the
+    // reverse) and blend seamlessly with the page background.
+    val activity = LocalContext.current as? android.app.Activity
+    if (activity != null) {
+        SideEffect {
+            val window = activity.window
+            val controller = WindowCompat.getInsetsController(window, window.decorView)
+            controller.isAppearanceLightStatusBars = !isDark
+            controller.isAppearanceLightNavigationBars = !isDark
+        }
+    }
     PhotoRouletteTheme(dark = isDark, dynamicColor = useDynamic) {
-        Scaffold(bottomBar = { NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 0.dp) { NavigationBarItem(selected = page == 0, onClick = { page = 0 }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }); NavigationBarItem(selected = page == 1, onClick = { page = 1 }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }) } }) { padding ->
+        val dc = designColors()
+        Scaffold(
+            containerColor = dc.pageBg,
+            bottomBar = {
+                // The review and memory pages are immersive: no bottom navigation.
+                if (page != 2 && page != 5) {
+                    NavigationBar(containerColor = dc.navBar, tonalElevation = 0.dp) {
+                val itemColors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = dc.accentText,
+                    selectedTextColor = dc.ink,
+                    indicatorColor = dc.card,
+                    unselectedIconColor = dc.labelGray,
+                    unselectedTextColor = dc.labelGray,
+                )
+                NavigationBarItem(selected = page == 0, onClick = { page = 0 }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }, colors = itemColors)
+                NavigationBarItem(selected = page == 4, onClick = { page = 4 }, icon = { Icon(Icons.Default.Info, null) }, label = { Text("统计") }, colors = itemColors)
+                NavigationBarItem(selected = page == 1, onClick = { page = 1 }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }, colors = itemColors)
+                }
+            }
+        }) { padding ->
             Box(Modifier.padding(padding).fillMaxSize()) {
-                if (page == 0) Home(state, onStart = { viewModel.reload(); page = 2 }, onScan = { showPicker = true }, openTrash = { page = 3 })
-                else if (page == 1) Settings(state.settings, viewModel)
-                else if (page == 3) RecycleBin(viewModel, onRestore = onRestoreFromTrash) { page = 0 }
-                else {
-                    val session by viewModel.sessionFlow.collectAsStateWithLifecycle(initialValue = viewModel.sessionFlow.value)
-                    Review(session, onAction, onUndo = viewModel::undo, onDone = { onCommitDeletes() })
+                when (page) {
+                    0 -> Home(state, onStart = { viewModel.reload(); page = 2 }, onScan = { showPicker = true }, onOpenMemory = { page = 5 })
+                    1 -> Settings(state.settings, viewModel, openTrash = { page = 3 })
+                    3 -> RecycleBin(viewModel, onRestore = onRestoreFromTrash) { page = 0 }
+                    4 -> StatsScreen(state)
+                    5 -> MemoryViewer(state.stats.memory, onBack = { page = 0 })
+                    else -> {
+                        val session by viewModel.sessionFlow.collectAsStateWithLifecycle(initialValue = viewModel.sessionFlow.value)
+                        Review(session, onAction, onUndo = viewModel::undo, onDone = { onCommitDeletes() }, onBack = { page = 0 })
+                    }
                 }
             }
         }
@@ -305,25 +350,9 @@ import kotlin.math.roundToInt
     }
 }
 
-@Composable private fun Home(state: com.einsli.photoroulette.AppUiState, onStart: () -> Unit, onScan: () -> Unit, openTrash: () -> Unit) = Column(Modifier.fillMaxSize().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-    Text("照片轮盘", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-    Spacer(Modifier.height(6.dp))
-    Text("版本 ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall)
-    Spacer(Modifier.height(36.dp))
-    if (state.loading) {
-        CircularProgressIndicator()
-        Spacer(Modifier.height(12.dp))
-        Text("正在加载照片队列…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-    } else {
-        Text("本次还有 ${state.remaining} 张", style = MaterialTheme.typography.headlineMedium)
-        Text("已整理 ${state.processed} / ${state.total}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-    Spacer(Modifier.height(32.dp)); Button(onStart, Modifier.fillMaxWidth().height(56.dp), enabled = !state.loading && (state.remaining > 0 || state.session?.queue?.isNotEmpty() == true)) { Text("开始整理") }
-    Spacer(Modifier.height(12.dp)); OutlinedButton(onScan, Modifier.fillMaxWidth()) { Text(if (state.total == 0) "扫描相册" else "重新扫描相册") }
-    Spacer(Modifier.height(8.dp)); OutlinedButton(onClick = openTrash, Modifier.fillMaxWidth()) { Text("回收站") }
-}
-
-@Composable private fun Review(session: ReviewSession?, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, onDone: () -> Unit) {
+@Composable private fun Review(session: ReviewSession?, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, onDone: () -> Unit, onBack: () -> Unit) {
+    // System back (including the edge-swipe gesture) returns to the home screen.
+    BackHandler(onBack = onBack)
     // ---- lifecycle-aware cooldown ----
     // A plain delay() keeps ticking while the activity is paused, so when a session ends and
     // the system trash confirmation dialog is on top, the cooldown finishes behind it — by the
@@ -351,7 +380,7 @@ import kotlin.math.roundToInt
     LaunchedEffect(currentId, resumed) {
         if (currentId == null) return@LaunchedEffect
         // Session finished (no photo left): nothing to hide, open immediately.
-        if (session?.current == null) { gate.value = false; return@LaunchedEffect }
+        if (session.current == null) { gate.value = false; return@LaunchedEffect }
         // A new session arrived while the app was paused (system trash dialog). Keep the
         // spinner; this effect restarts when ON_RESUME fires and runs the cooldown then.
         if (!resumed) return@LaunchedEffect
@@ -359,14 +388,24 @@ import kotlin.math.roundToInt
         gate.value = false
     }
     // ----------------------------------------------------------------
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("本次整理", style = MaterialTheme.typography.titleLarge); Row { TextButton(onClick = onUndo, enabled = (session?.position ?: 0) > 0) { Text("上一张") }; Text("剩余 ${session?.remaining ?: 0} / ${session?.queue?.size ?: 0}") } }
-        Spacer(Modifier.height(16.dp))
+    val dc = designColors()
+    Column(Modifier.fillMaxSize().background(dc.pageBg).padding(horizontal = 20.dp)) {
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+            Text("本次整理", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = dc.ink, modifier = Modifier.weight(1f))
+            Text("剩余 ${session?.remaining ?: 0} / ${session?.queue?.size ?: 0}", fontSize = 13.sp, color = dc.slate)
+        }
+        Spacer(Modifier.height(12.dp))
         when {
-            session == null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { CircularProgressIndicator() }
-            gate.value && session.current != null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { CircularProgressIndicator() }
-            session.current == null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("本次完成！", style = MaterialTheme.typography.headlineMedium); Spacer(Modifier.height(16.dp)); Button(onDone) { Text("处理删除并继续整理") } }
-            else -> Box(Modifier.fillMaxWidth().weight(1f)) { SwipePhoto(session, onAction) }
+            session == null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { CircularProgressIndicator(color = dc.accent) }
+            gate.value && session.current != null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { CircularProgressIndicator(color = dc.accent) }
+            session.current == null -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Text("本次完成！", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onDone, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White)) { Text("处理删除并继续整理") }
+            }
+            else -> Box(Modifier.fillMaxWidth().weight(1f)) { SwipePhoto(session, onAction, onUndo) }
         }
     }
 }
@@ -374,7 +413,8 @@ import kotlin.math.roundToInt
 private fun formatTaken(taken: Long): String =
     if (taken <= 0L) "" else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(taken))
 
-@Composable private fun SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int, Long) -> Boolean) {
+@Composable private fun SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit) {
+    val dc = designColors()
     val photo = session.current!!
     val swipeThreshold = with(LocalDensity.current) { 120.dp.toPx() }
     val flyOutDistance = with(LocalDensity.current) { 1600.dp.toPx() }
@@ -483,56 +523,389 @@ private fun formatTaken(taken: Long): String =
                     .align(Alignment.TopStart)
                     .padding(12.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.8f))
+                    .background(dc.white.copy(alpha = 0.85f))
                     .padding(horizontal = 8.dp, vertical = 4.dp),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface
+                color = dc.ink
             )
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FilledTonalButton(onClick = { onAction(photo.mediaId, PhotoState.DELETE_PENDING, -1, userTouchedAt) }, Modifier.weight(1f)) { Text("删除") }
-            FilledTonalButton(onClick = { onAction(photo.mediaId, PhotoState.KEEP, 1, userTouchedAt) }, Modifier.weight(1f), colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFFBBFFFF), contentColor = Color(0xFF00382F))) { Text("保留") }
+        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            // 上一张: outline / secondary
+            OutlinedButton(
+                onClick = onUndo,
+                enabled = session.position > 0,
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = dc.labelGray),
+                border = BorderStroke(1.dp, dc.track)
+            ) { Text("上一张") }
+            // 删除: tonal / danger — low-saturation red container, soft red content
+            FilledTonalButton(
+                onClick = { onAction(photo.mediaId, PhotoState.DELETE_PENDING, -1, userTouchedAt) },
+                Modifier.weight(1f).height(52.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = dc.dangerContainer,
+                    contentColor = dc.onDangerContainer
+                )
+            ) { Text("删除", fontWeight = FontWeight.SemiBold) }
+            // 保留: filled / primary — app lavender primary
+            Button(
+                onClick = { onAction(photo.mediaId, PhotoState.KEEP, 1, userTouchedAt) },
+                Modifier.weight(1f).height(52.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White)
+            ) { Text("保留", fontWeight = FontWeight.Bold) }
         }
     }
 }
 
-@Composable private fun Settings(settings: AppSettings, vm: PhotoViewModel) = Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-    Text("设置", style = MaterialTheme.typography.headlineMedium)
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun Settings(settings: AppSettings, vm: PhotoViewModel, openTrash: () -> Unit) {
+    val dc = designColors()
+    var showTimePicker by remember { mutableStateOf(false) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showResetConfirm by remember { mutableStateOf(false) }
+    val dateFormatter = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
 
-    // Theme — three options, applies immediately
-    Text("外观", style = MaterialTheme.typography.titleSmall)
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        val labels = listOf("跟随系统" to 0, "浅色" to 1, "深色" to 2)
-        labels.forEach { (label, mode) ->
-            val selected = settings.darkMode == mode
-            FilterChip(selected = selected, onClick = { vm.setDarkMode(mode) }, label = { Text(label) })
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(dc.pageBg)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+    ) {
+        Spacer(Modifier.height(12.dp))
+        Text("设置", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+        Spacer(Modifier.height(14.dp))
+
+        // ── 外观: Material 3 SegmentedButton (selected = purple) ──
+        SettingCard {
+            Text("外观", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.slate)
+            Spacer(Modifier.height(8.dp))
+            val options = listOf("跟随系统" to 0, "浅色" to 1, "深色" to 2)
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                options.forEachIndexed { index, (label, mode) ->
+                    SegmentedButton(
+                        selected = settings.darkMode == mode,
+                        onClick = { vm.setDarkMode(mode) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    ) {
+                        Text(label, fontSize = 12.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // ── 每次整理数量: standard Material 3 Slider ──
+        var count by remember(settings) { mutableIntStateOf(settings.dailyCount) }
+        SettingCard {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("每次整理数量", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.ink)
+                Text("$count 张", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = dc.accentText)
+            }
+            Slider(
+                value = count.toFloat(),
+                onValueChange = { count = it.roundToInt().coerceIn(5, 50) },
+                valueRange = 5f..50f,
+                steps = 8,
+                onValueChangeFinished = { vm.setDailyCount(count) }
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // ── 每日提醒: tap the time for a Material 3 TimePicker ──
+        var hour by remember(settings) { mutableIntStateOf(settings.reminderHour) }
+        SettingCard {
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { showTimePicker = true }.padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("每日提醒", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.ink)
+                    Text("点击时间可精确设置", fontSize = 11.sp, color = dc.labelGray)
+                }
+                Text("${hour.toString().padStart(2, '0')}:${settings.reminderMinute.toString().padStart(2, '0')}", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = dc.accentText)
+            }
+            Slider(
+                value = hour.toFloat(),
+                onValueChange = { hour = it.roundToInt().coerceIn(0, 23) },
+                valueRange = 0f..23f,
+                steps = 22,
+                onValueChangeFinished = { vm.setReminderHour(hour) }
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // ── 照片范围 ──
+        SettingCard {
+            Text("照片范围", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.slate)
+            Spacer(Modifier.height(4.dp))
+            val rangeOptions = listOf(
+                "all" to "全部照片",
+                "lastYear" to "最近一年",
+                "beforeLastYear" to "一年以前",
+                "custom" to "自定义时间",
+            )
+            rangeOptions.forEach { (key, label) ->
+                SettingRadioRow(label, settings.photoRange == key, onClick = { vm.setPhotoRange(key) }, dc)
+            }
+            if (settings.photoRange == "custom") {
+                Spacer(Modifier.height(2.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (settings.customRangeStart > 0) "从 ${dateFormatter.format(Date(settings.customRangeStart))} 起" else "尚未选择起始日期",
+                        fontSize = 12.sp,
+                        color = dc.slate
+                    )
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { showDatePicker = true }) { Text("选择日期", color = dc.accentText, fontSize = 12.sp) }
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // ── 整理策略 ──
+        SettingCard {
+            Text("整理策略", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.slate)
+            Spacer(Modifier.height(4.dp))
+            val strategyOptions = listOf(
+                "random" to "随机",
+                "oldest" to "优先旧照片",
+                "largest" to "优先大照片",
+            )
+            strategyOptions.forEach { (key, label) ->
+                SettingRadioRow(label, settings.strategy == key, onClick = { vm.setStrategy(key) }, dc)
+            }
+            Spacer(Modifier.height(2.dp))
+            Text("策略将在下一次「开始整理」时生效", fontSize = 11.sp, color = dc.labelGray)
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // ── 内容 ──
+        SettingCard {
+            Text("内容", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.slate)
+            Spacer(Modifier.height(2.dp))
+            var videos by remember(settings) { mutableStateOf(settings.includeVideos) }
+            SettingSwitchRow("包含视频", videos, { videos = it; vm.setIncludeVideos(it) }, dc)
+            HorizontalDivider(color = dc.track.copy(alpha = 0.6f))
+            var screenshots by remember(settings) { mutableStateOf(settings.includeScreenshots) }
+            SettingSwitchRow("包含截图", screenshots, { screenshots = it; vm.setIncludeScreenshots(it) }, dc)
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // ── 其他 ──
+        SettingCard {
+            Text("其他", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.slate)
+            Spacer(Modifier.height(2.dp))
+            SettingNavRow("回收站", openTrash, dc)
+            HorizontalDivider(color = dc.track.copy(alpha = 0.6f))
+            SettingNavRow("整理记录", { showResetConfirm = true }, dc)
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+
+    if (showTimePicker) {
+        val timeState = rememberTimePickerState(initialHour = settings.reminderHour, initialMinute = settings.reminderMinute, is24Hour = true)
+        BasicAlertDialog(onDismissRequest = { showTimePicker = false }) {
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                tonalElevation = 6.dp
+            ) {
+                Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("选择提醒时间", style = MaterialTheme.typography.titleMedium)
+                    TimePicker(state = timeState)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { showTimePicker = false }) { Text("取消") }
+                        TextButton(onClick = {
+                            vm.setReminderHour(timeState.hour)
+                            vm.setReminderMinute(timeState.minute)
+                            showTimePicker = false
+                        }) { Text("确定") }
+                    }
+                }
+            }
         }
     }
 
-    // Daily count — slider, saves on release
-    var count by remember(settings) { mutableIntStateOf(settings.dailyCount) }
-    Text("每次照片数量：$count")
-    Slider(count.toFloat(), { count = it.roundToInt().coerceIn(5, 50) }, valueRange = 5f..50f, steps = 8,
-        onValueChangeFinished = { vm.setDailyCount(count) })
-
-    // Reminder hour
-    var hour by remember(settings) { mutableIntStateOf(settings.reminderHour) }
-    Text("每日提醒：${hour.toString().padStart(2, '0')}:00")
-    Slider(hour.toFloat(), { hour = it.roundToInt().coerceIn(0, 23) }, valueRange = 0f..23f, steps = 22,
-        onValueChangeFinished = { vm.setReminderHour(hour) })
-
-    // Toggles — save immediately
-    var videos by remember(settings) { mutableStateOf(settings.includeVideos) }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text("包含视频")
-        Switch(videos, { videos = it; vm.setIncludeVideos(it) })
-    }
-    var screenshots by remember(settings) { mutableStateOf(settings.includeScreenshots) }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text("包含截图")
-        Switch(screenshots, { screenshots = it; vm.setIncludeScreenshots(it) })
+    if (showDatePicker) {
+        val dateState = rememberDatePickerState(initialSelectedDateMillis = if (settings.customRangeStart > 0) settings.customRangeStart else null)
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    dateState.selectedDateMillis?.let { vm.setCustomRangeStart(it) }
+                    showDatePicker = false
+                }) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("取消") } }
+        ) { DatePicker(state = dateState) }
     }
 
-    Spacer(Modifier.height(12.dp))
-    OutlinedButton(vm::reset, Modifier.fillMaxWidth()) { Text("重置整理记录") }
+    if (showResetConfirm) {
+        AlertDialog(
+            onDismissRequest = { showResetConfirm = false },
+            title = { Text("重置整理记录？") },
+            text = { Text("所有已经处理过的照片将重新进入随机池。\n不会删除照片。") },
+            confirmButton = {
+                TextButton(
+                    onClick = { showResetConfirm = false; vm.reset() },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) { Text("重置") }
+            },
+            dismissButton = { TextButton(onClick = { showResetConfirm = false }) { Text("取消") } }
+        )
+    }
+}
+
+@Composable
+private fun SettingCard(content: @Composable ColumnScope.() -> Unit) {
+    val dc = designColors()
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = dc.card),
+        elevation = CardDefaults.cardElevation(0.dp)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), content = content)
+    }
+}
+
+@Composable
+private fun SettingSwitchRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit, dc: DesignColors) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 14.sp, color = dc.ink)
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = dc.accent,
+                checkedTrackColor = dc.accent.copy(alpha = 0.4f),
+                uncheckedThumbColor = dc.labelGray,
+                uncheckedTrackColor = dc.track
+            )
+        )
+    }
+}
+
+@Composable
+private fun SettingRadioRow(label: String, selected: Boolean, onClick: () -> Unit, dc: DesignColors) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
+            colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.primary)
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(label, fontSize = 14.sp, color = dc.ink)
+    }
+}
+
+@Composable
+private fun SettingNavRow(label: String, onClick: () -> Unit, dc: DesignColors) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 14.sp, color = dc.ink)
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = dc.labelGray, modifier = Modifier.size(20.dp))
+    }
+}
+
+/** Full-screen browse of "N年前的今天" photos, reached via 回忆时光机 → 去看看. */
+@Composable
+private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
+    val dc = designColors()
+    val photos = memory?.photos ?: emptyList()
+    var previewIndex by remember { mutableIntStateOf(-1) }
+    // System back (including the edge-swipe gesture): close the full-screen preview first,
+    // otherwise return to the home screen.
+    BackHandler {
+        if (previewIndex in photos.indices) previewIndex = -1 else onBack()
+    }
+    Box(Modifier.fillMaxSize().background(dc.pageBg)) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) { Icon(Icons.Default.Close, "返回") }
+                Column(Modifier.weight(1f)) {
+                    Text("回忆时光机", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+                    if (memory != null) {
+                        Text("${memory.yearsAgo}年前的今天 · ${memory.dateText} · ${memory.count} 张照片", fontSize = 12.sp, color = dc.slate)
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            if (photos.isEmpty()) {
+                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Text("暂无回忆", color = dc.slate)
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    itemsIndexed(photos) { index, photo ->
+                        Box(
+                            Modifier
+                                .aspectRatio(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(dc.white)
+                                .clickable { previewIndex = index }
+                        ) {
+                            AsyncImage(photo.uri, photo.displayName, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        }
+                    }
+                }
+            }
+        }
+        if (previewIndex in photos.indices) {
+            MemoryPreview(photos, previewIndex, onClose = { previewIndex = -1 })
+        }
+    }
+}
+
+@Composable
+private fun MemoryPreview(photos: List<PhotoEntity>, initialIndex: Int, onClose: () -> Unit) {
+    val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, (photos.size - 1).coerceAtLeast(0))) { photos.size }
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        Column(Modifier.fillMaxSize().systemBarsPadding()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onClose) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
+                Text(
+                    photos[pagerState.currentPage].displayName,
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                )
+                Text(
+                    "${pagerState.currentPage + 1}/${photos.size}",
+                    color = Color.White.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+            }
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth().weight(1f)) { page ->
+                ZoomablePhoto(photos[page])
+            }
+        }
+    }
 }

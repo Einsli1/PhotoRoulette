@@ -8,6 +8,9 @@ import androidx.lifecycle.viewModelScope
 import com.einsli.photoroulette.data.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 
 data class ReviewSession(
     val sessionId: Long,
@@ -19,12 +22,39 @@ data class ReviewSession(
     val remaining: Int get() = (queue.size - position).coerceAtLeast(0)
 }
 
+/** "5年前的今天" style memory: a group of photos taken on this month/day in a past year. */
+data class MemoryInfo(
+    val yearsAgo: Int,
+    val dateText: String,
+    val count: Int,
+    val photos: List<PhotoEntity>,
+)
+
+/** Last-7-days organizing trend plus weekly roll-up. */
+data class WeekStats(
+    val days: List<Int>,        // 7 entries, oldest first, today last
+    val organized: Int,
+    val kept: Int,
+    val freedBytes: Long,
+) {
+    val deleted: Int get() = (organized - kept).coerceAtLeast(0)
+}
+
+data class HomeStats(
+    val kept: Int = 0,
+    val streak: Int = 0,
+    val trashBytes: Long = 0,
+    val memory: MemoryInfo? = null,
+)
+
 data class AppUiState(
     val loading: Boolean = true,
     val session: ReviewSession? = null,
     val total: Int = 0,
     val processed: Int = 0,
     val settings: AppSettings = AppSettings(),
+    val stats: HomeStats = HomeStats(),
+    val week: WeekStats = WeekStats(List(7) { 0 }, 0, 0, 0),
 ) {
     val remaining: Int get() = session?.remaining ?: 0
 }
@@ -58,8 +88,30 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     private val undoStack = ArrayDeque<Pair<PhotoEntity, PhotoState>>()
     private val counts = combine(repository.totalCount, repository.processedCount) { total, processed -> total to processed }
     val trashItems: Flow<List<PhotoEntity>> = repository.trashItems
-    val ui = combine(settings, session, counts) { config, sess, c ->
-        AppUiState(sess == null, sess, c.first, c.second, config)
+    private val homeStats = combine(
+        repository.keptCount,
+        repository.processedDays.map { computeStreak(it) },
+        repository.trashBytes,
+        repository.memoryCandidates.map { buildMemory(it) }
+    ) { kept, streak, bytes, memory ->
+        HomeStats(kept, streak, bytes, memory)
+    }
+    // Rolling 7-day window (today + previous 6 days) for the stats trend.
+    private val weekSince = System.currentTimeMillis() - 6L * 24 * 3600 * 1000
+    private val weekStats = combine(
+        repository.dayCountsSince(weekSince),
+        repository.weekKept(weekSince),
+        repository.weekFreedBytes(weekSince)
+    ) { dayCounts, kept, freed ->
+        val byDay = dayCounts.associate { it.day to it.cnt }
+        val today = LocalDate.now()
+        val days = (6 downTo 0).map { offset ->
+            byDay[today.minusDays(offset.toLong()).toString()] ?: 0
+        }
+        WeekStats(days, days.sum(), kept, freed)
+    }
+    val ui = combine(settings, session, counts, homeStats, weekStats) { config, sess, c, stats, week ->
+        AppUiState(sess == null, sess, c.first, c.second, config, stats, week)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, AppUiState())
 
     init { reload() }
@@ -166,7 +218,11 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     fun setIncludeVideos(v: Boolean) = viewModelScope.launch { settingsRepository.save(settings.value.copy(includeVideos = v)) }
     fun setIncludeScreenshots(v: Boolean) = viewModelScope.launch { settingsRepository.save(settings.value.copy(includeScreenshots = v)) }
     fun setReminderHour(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(reminderHour = v)) }
+    fun setReminderMinute(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(reminderMinute = v)) }
     fun setDarkMode(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(darkMode = v)) }
+    fun setPhotoRange(v: String) = viewModelScope.launch { settingsRepository.save(settings.value.copy(photoRange = v)) }
+    fun setCustomRangeStart(v: Long) = viewModelScope.launch { settingsRepository.save(settings.value.copy(photoRange = "custom", customRangeStart = v)) }
+    fun setStrategy(v: String) = viewModelScope.launch { settingsRepository.save(settings.value.copy(strategy = v)) }
     fun nextSession() = viewModelScope.launch { Log.d(TAG, "nextSession() starting"); repository.startNextSession(); Log.d(TAG, "nextSession() calling reload"); reload() }
     suspend fun pendingDeletes() = repository.pendingDeletes()
     fun confirmDeleted(ids: List<Long>) = viewModelScope.launch { Log.d(TAG, "confirmDeleted(${ids.size} photos)"); repository.confirmDeleted(ids) }
@@ -175,6 +231,47 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     fun revertPendingDeletes(ids: List<Long>) = viewModelScope.launch { Log.d(TAG, "revertPendingDeletes(${ids.size})"); repository.revertPendingDeletes(ids) }
     fun deleteFromTrash(ids: List<Long>) = viewModelScope.launch { repository.deleteFromTrash(ids) }
     fun reset() = viewModelScope.launch { repository.reset(); reload() }
+
+    // ── home-screen stats helpers ────────────────────────────────────────────
+
+    /** Consecutive days (ending today or yesterday) on which at least one photo was processed. */
+    private fun computeStreak(dayStrings: List<String>): Int {
+        val today = LocalDate.now()
+        val days = dayStrings.mapNotNull { runCatching { LocalDate.parse(it) }.getOrNull() }.sortedDescending()
+        var streak = 0
+        var expected = today
+        for ((i, d) in days.withIndex()) {
+            if (i == 0) {
+                // A streak still counts if the last active day is today OR yesterday
+                // (the user simply hasn't opened the app yet today).
+                if (d != expected && d != expected.minusDays(1)) break
+            } else if (d != expected.minusDays(1)) break
+            streak++
+            expected = d
+        }
+        return streak
+    }
+
+    /** Oldest group of photos taken on today's month/day in a past year → "N年前的今天". */
+    private fun buildMemory(candidates: List<PhotoEntity>): MemoryInfo? {
+        if (candidates.isEmpty()) return null
+        val zone = ZoneId.systemDefault()
+        val today = LocalDate.now()
+        val matches = candidates.mapNotNull { photo ->
+            val d = runCatching { Instant.ofEpochMilli(photo.dateTaken).atZone(zone).toLocalDate() }.getOrNull()
+            if (d != null && d.monthValue == today.monthValue && d.dayOfMonth == today.dayOfMonth && d.year < today.year) photo to d else null
+        }
+        if (matches.isEmpty()) return null
+        val oldestYear = matches.minOf { it.second.year }
+        val group = matches.filter { it.second.year == oldestYear }.map { it.first }
+        val date = Instant.ofEpochMilli(group.first().dateTaken).atZone(zone).toLocalDate()
+        return MemoryInfo(
+            yearsAgo = today.year - oldestYear,
+            dateText = "${date.year}年${date.monthValue}月${date.dayOfMonth}日",
+            count = group.size,
+            photos = group
+        )
+    }
 
     class Factory(private val repository: PhotoRepository, private val settings: SettingsRepository) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T = PhotoViewModel(repository, settings) as T
