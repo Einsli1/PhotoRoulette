@@ -117,6 +117,16 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     init { reload() }
 
     fun scan() = viewModelScope.launch { repository.scanGallery(settings.value); reload() }
+
+    /** Save the album selection, then rescan so the photo total reflects it. The scan only
+     *  INSERTs photos that are new to the DB — processed history (kept / deleted / streak) is
+     *  preserved; this is NOT a reset. */
+    fun updateAlbums(albums: List<String>) = viewModelScope.launch {
+        val next = settings.value.copy(includedAlbums = albums)
+        settingsRepository.save(next)
+        repository.scanGallery(next)
+        reload()
+    }
     suspend fun availableAlbums(): List<String> = repository.listAlbums(settings.value.includeVideos)
 
     fun reload() {
@@ -211,7 +221,6 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         }
     }
 
-    fun saveSettings(newSettings: AppSettings) = viewModelScope.launch { settingsRepository.save(newSettings); reload() }
     // Individual setters — save immediately without rebuilding the queue. The new values take
     // effect on the next session / 开始整理 (or immediately for darkMode via theme recomposition).
     fun setDailyCount(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(dailyCount = v)) }

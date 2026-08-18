@@ -31,6 +31,11 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
 
     suspend fun scanGallery(config: AppSettings): Int {
         dao.insertAll(scanner.scan(config.includeVideos, config.includeScreenshots, config.includedAlbums))
+        // Drop unprocessed photos from albums that are no longer selected, so the total count
+        // tracks the album selection. Processed / trashed photos are left untouched.
+        if (config.includedAlbums.isNotEmpty()) {
+            dao.deleteOutOfScope(config.includedAlbums.map { it.uppercase() })
+        }
         return dao.totalNow()
     }
 

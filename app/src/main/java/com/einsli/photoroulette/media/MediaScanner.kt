@@ -22,7 +22,7 @@ class MediaScanner(private val resolver: ContentResolver) {
                     val mediaId = cursor.getLong(id)
                     val uri = if (cursor.getString(mime).startsWith("video/")) MediaStore.Video.Media.getContentUri(volume, mediaId) else MediaStore.Images.Media.getContentUri(volume, mediaId)
                     val bytes = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else 0L
-                    add(PhotoEntity(mediaId, uri.toString(), cursor.getString(name).orEmpty(), cursor.getLong(taken), cursor.getString(mime).orEmpty(), bytes))
+                    add(PhotoEntity(mediaId, uri.toString(), cursor.getString(name).orEmpty(), cursor.getLong(taken), cursor.getString(mime).orEmpty(), relativePath, bytes))
                 }
             } }
         } ?: emptyList()

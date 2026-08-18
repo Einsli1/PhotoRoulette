@@ -11,6 +11,14 @@ interface PhotoDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(items: List<PhotoEntity>)
 
+    // Photos of deselected albums that were never processed: removed on rescan so the pool and
+    // the total count reflect the album selection. Processed / trashed photos are kept, so the
+    // organizing history and the trash can never be wiped by a selection change. [albums] must
+    // be non-empty; pass the album paths uppercased to match MediaScanner's case-insensitive
+    // album matching.
+    @Query("DELETE FROM photos WHERE inTrash = 0 AND state IN ('UNSEEN', 'SKIP') AND album != '' AND UPPER(album) NOT IN (:albums)")
+    suspend fun deleteOutOfScope(albums: List<String>)
+
     // ── candidate selection: strategy (random / oldest / largest) × date range ──
     @Query("SELECT * FROM photos WHERE state IN ('UNSEEN', 'SKIP') AND inTrash = 0 AND (:minDate IS NULL OR dateTaken >= :minDate) AND (:maxDate IS NULL OR dateTaken < :maxDate) ORDER BY RANDOM() LIMIT :limit")
     suspend fun randomCandidates(limit: Int, minDate: Long?, maxDate: Long?): List<PhotoEntity>
