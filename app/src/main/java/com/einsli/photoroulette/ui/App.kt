@@ -26,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -75,6 +76,20 @@ import com.einsli.photoroulette.data.PhotoState
  *  MemoryViewer (5) are standalone pages entered via a dedicated button. */
 private val immersivePages = setOf(2, 3, 5)
 
+/**
+ * Where a page "comes from" on the screen, used as the scale transform origin for the
+ * page transition. The origin matches the position of the entry button on the source
+ * page: Review (2) opens from the middle (今日任务's 继续整理 button), RecycleBin (3)
+ * from the upper area (设置's 回收站 row), MemoryViewer (5) from the lower part of the
+ * screen (回忆时光机 card). Other pages zoom from the center.
+ */
+private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
+    2 -> TransformOrigin(0.5f, 0.35f)
+    3 -> TransformOrigin(0.5f, 0.3f)
+    5 -> TransformOrigin(0.5f, 0.75f)
+    else -> TransformOrigin(0.5f, 0.5f)
+}
+
 @Composable fun PhotoRouletteApp(viewModel: PhotoViewModel, onAction: (Long, PhotoState, Int, Long) -> Boolean, onCommitDeletes: () -> Unit, onRestoreFromTrash: (List<Long>) -> Unit) {
     val state by viewModel.ui.collectAsStateWithLifecycle()
     // Collected at the app level so the value is already loaded when the RecycleBin opens.
@@ -82,6 +97,9 @@ private val immersivePages = setOf(2, 3, 5)
     var page by rememberSaveable { mutableIntStateOf(0) }
     // Hoisted so the Settings scroll position survives navigating away and back.
     val settingsScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
+    // Manual snapshot of the Settings scroll value: AnimatedContent re-composes the page, and
+    // the restored ScrollState can be clamped before layout, so we re-apply the value on return.
+    var savedSettingsScroll by rememberSaveable { mutableIntStateOf(0) }
     var showPicker by remember { mutableStateOf(false) }
     val darkMode = state.settings.darkMode
     val isDark = when (darkMode) { 1 -> false; 2 -> true; else -> isSystemInDarkTheme() }
@@ -100,6 +118,9 @@ private val immersivePages = setOf(2, 3, 5)
         }
     }
     fun navigate(newPage: Int) {
+        // Snapshot the Settings scroll position before leaving so it can be restored exactly
+        // (the ScrollState alone drifts because it gets clamped before layout on re-entry).
+        if (page == 1) savedSettingsScroll = settingsScroll.value
         if (page != newPage) page = newPage
     }
     PhotoRouletteTheme(dark = isDark, dynamicColor = useDynamic) {
@@ -109,38 +130,114 @@ private val immersivePages = setOf(2, 3, 5)
             bottomBar = {
                 // Review (2) and MemoryViewer (5) are immersive: no bottom navigation.
                 if (page !in immersivePages) {
-                    NavigationBar(containerColor = dc.navBar, tonalElevation = 0.dp) {
+                    // Slightly slimmer than the 80dp default so the content area stays roomy,
+                    // but tall enough that the icons and labels never clip.
+                    NavigationBar(
+                        containerColor = dc.navBar,
+                        tonalElevation = 0.dp,
+                        modifier = Modifier.height(85.dp)
+                    ) {
                         val itemColors = NavigationBarItemDefaults.colors(
                             selectedIconColor = dc.accentText,
                             selectedTextColor = dc.ink,
-                            indicatorColor = dc.card,
+                            indicatorColor = dc.navIndicator,
                             unselectedIconColor = dc.labelGray,
                             unselectedTextColor = dc.labelGray,
                         )
-                        NavigationBarItem(selected = page == 0, onClick = { navigate(0) }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }, colors = itemColors)
-                        NavigationBarItem(selected = page == 4, onClick = { navigate(4) }, icon = { Icon(Icons.Default.Info, null) }, label = { Text("统计") }, colors = itemColors)
-                        NavigationBarItem(selected = page == 1, onClick = { navigate(1) }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }, colors = itemColors)
+                        NavigationBarItem(
+                            selected = page == 0, onClick = { navigate(0) },
+                            icon = { Icon(Icons.Default.Home, null, modifier = Modifier.size(24.dp)) },
+                            label = { Text("首页", fontSize = 11.sp) }, colors = itemColors
+                        )
+                        NavigationBarItem(
+                            selected = page == 4, onClick = { navigate(4) },
+                            icon = { Icon(Icons.Default.Info, null, modifier = Modifier.size(24.dp)) },
+                            label = { Text("统计", fontSize = 11.sp) }, colors = itemColors
+                        )
+                        NavigationBarItem(
+                            selected = page == 1, onClick = { navigate(1) },
+                            icon = { Icon(Icons.Default.Settings, null, modifier = Modifier.size(24.dp)) },
+                            label = { Text("设置", fontSize = 11.sp) }, colors = itemColors
+                        )
                     }
                 }
             }
         ) { padding ->
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .then(if (page in immersivePages) Modifier else Modifier.padding(padding))
-            ) {
-                PageContent(
-                    page = page,
-                    state = state,
-                    viewModel = viewModel,
-                    settingsScroll = settingsScroll,
-                    trashItems = trashItems,
-                    onAction = onAction,
-                    onCommitDeletes = onCommitDeletes,
-                    onRestoreFromTrash = onRestoreFromTrash,
-                    onNavigate = ::navigate,
-                    onScan = { showPicker = true }
-                )
+            // Page transition, "zoom from the tapped card" style: when opening an immersive
+            // page (Review/RecycleBin/MemoryViewer) the current page stays fully visible
+            // underneath while the new page grows from its entry card and covers it; going
+            // back, the immersive page shrinks back into the card, revealing the static
+            // destination page underneath. Tab-to-tab keeps a subtle center zoom.
+            AnimatedContent(
+                targetState = page,
+                transitionSpec = {
+                    val enteringImmersive = targetState in immersivePages
+                    val leavingImmersive = initialState in immersivePages
+                    when {
+                        enteringImmersive -> {
+                            // Current page stays put (no exit), new page zooms in from its card.
+                            val origin = pageTransformOrigin(targetState)
+                            val ct = (scaleIn(
+                                initialScale = 0.55f,
+                                transformOrigin = origin,
+                                animationSpec = tween(320, easing = FastOutSlowInEasing)
+                            ) + fadeIn(tween(260)))
+                                .togetherWith(ExitTransition.None)
+                            ct.targetContentZIndex = 1f
+                            ct
+                        }
+                        leavingImmersive -> {
+                            // Destination page is already fully visible underneath; the immersive
+                            // page shrinks back into the card it came from.
+                            val origin = pageTransformOrigin(initialState)
+                            val ct = EnterTransition.None.togetherWith(
+                                scaleOut(
+                                    targetScale = 0.55f,
+                                    transformOrigin = origin,
+                                    animationSpec = tween(300)
+                                ) + fadeOut(tween(240))
+                            )
+                            ct.targetContentZIndex = 0f
+                            ct
+                        }
+                        else -> {
+                            // Plain tab switches: subtle center zoom both ways.
+                            (scaleIn(
+                                initialScale = 0.94f,
+                                transformOrigin = TransformOrigin(0.5f, 0.5f),
+                                animationSpec = tween(240, easing = FastOutSlowInEasing)
+                            ) + fadeIn(tween(180)))
+                                .togetherWith(
+                                    scaleOut(
+                                        targetScale = 0.96f,
+                                        transformOrigin = TransformOrigin(0.5f, 0.5f),
+                                        animationSpec = tween(200)
+                                    ) + fadeOut(tween(160))
+                                )
+                        }
+                    }
+                },
+                label = "page"
+            ) { targetPage ->
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .then(if (targetPage in immersivePages) Modifier else Modifier.padding(padding))
+                ) {
+                    PageContent(
+                        page = targetPage,
+                        state = state,
+                        viewModel = viewModel,
+                        settingsScroll = settingsScroll,
+                        savedSettingsScroll = savedSettingsScroll,
+                        trashItems = trashItems,
+                        onAction = onAction,
+                        onCommitDeletes = onCommitDeletes,
+                        onRestoreFromTrash = onRestoreFromTrash,
+                        onNavigate = ::navigate,
+                        onScan = { showPicker = true }
+                    )
+                }
             }
         }
     }
@@ -157,6 +254,7 @@ private fun PageContent(
     state: AppUiState,
     viewModel: PhotoViewModel,
     settingsScroll: ScrollState,
+    savedSettingsScroll: Int,
     trashItems: List<PhotoEntity>,
     onAction: (Long, PhotoState, Int, Long) -> Boolean,
     onCommitDeletes: () -> Unit,
@@ -166,7 +264,7 @@ private fun PageContent(
 ) {
     when (page) {
         0 -> Home(state, onStart = { viewModel.reload(); onNavigate(2) }, onScan = onScan, onOpenMemory = { onNavigate(5) })
-        1 -> Settings(state.settings, viewModel, scrollState = settingsScroll, openTrash = { onNavigate(3) })
+        1 -> Settings(state.settings, viewModel, scrollState = settingsScroll, savedScroll = savedSettingsScroll, openTrash = { onNavigate(3) })
         3 -> RecycleBin(trashItems, viewModel, onRestore = onRestoreFromTrash, onBack = { onNavigate(1) })
         4 -> StatsScreen(state)
         5 -> MemoryViewer(state.stats.memory, onBack = { onNavigate(0) })
@@ -658,12 +756,23 @@ private fun formatTaken(taken: Long): String =
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun Settings(settings: AppSettings, vm: PhotoViewModel, scrollState: ScrollState, openTrash: () -> Unit) {
+@Composable private fun Settings(settings: AppSettings, vm: PhotoViewModel, scrollState: ScrollState, savedScroll: Int, openTrash: () -> Unit) {
     val dc = designColors()
     var showDatePicker by remember { mutableStateOf(false) }
     var showResetConfirm by remember { mutableStateOf(false) }
     var showAlbumPicker by remember { mutableStateOf(false) }
     val dateFormatter = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
+    // Restore the exact scroll position saved when leaving this page. The ScrollState is
+    // re-created via its Saver, but it can be clamped before the content is laid out, so we
+    // wait for the layout (maxValue is valid) and then re-apply the snapshot.
+    LaunchedEffect(Unit) {
+        if (savedScroll > 0) {
+            withFrameNanos { }
+            if (scrollState.maxValue > 0) {
+                scrollState.scrollTo(savedScroll.coerceAtMost(scrollState.maxValue))
+            }
+        }
+    }
 
     Column(
         Modifier
@@ -672,7 +781,7 @@ private fun formatTaken(taken: Long): String =
             .verticalScroll(scrollState)
             .padding(horizontal = 20.dp)
     ) {
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(18.dp))
         Text("设置", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = dc.ink)
         Spacer(Modifier.height(14.dp))
 

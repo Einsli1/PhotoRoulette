@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
@@ -57,17 +58,20 @@ fun Home(state: AppUiState, onStart: () -> Unit, onScan: () -> Unit, onOpenMemor
             .background(dc.pageBg)
             .padding(horizontal = 20.dp)
     ) {
+        // Minimal top elastic space — the content hugs the top so the task card and its
+        // photo preview get as much room as possible.
+        Spacer(Modifier.weight(0.02f))
         Header()
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp))
         TodayTaskCard(state, onStart, onScan)
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(16.dp))
         ProgressSection(state)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(14.dp))
         StatsRow(state)
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(16.dp))
         MemoryCard(state, onOpenMemory)
-        Spacer(Modifier.weight(1f))
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.weight(0.2f))
     }
 }
 
@@ -77,7 +81,7 @@ private fun Header() {
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(top = 8.dp),
+            .padding(top = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
@@ -103,23 +107,19 @@ private fun Header() {
             )
         }
         Spacer(Modifier.width(12.dp))
-        // The wheel icon. In light mode it sits on a lavender disc; in dark mode it stands
-        // alone (no frame) and is zoomed slightly so the artwork's white margin is clipped.
+        // App icon: light theme uses icon.png, dark theme uses dark_icon.png. Shown full
+        // inside a rounded-rectangle frame (no circular crop, no zoom-to-hide-margin).
+        val iconRes = if (dc.isDark) R.drawable.dark_icon else R.drawable.icon
         Box(
             Modifier
                 .size(76.dp)
-                .clip(CircleShape)
-                .then(if (dc.isDark) Modifier else Modifier.background(dc.card)),
+                .clip(RoundedCornerShape(18.dp)),
             contentAlignment = Alignment.Center
         ) {
             Image(
-                painter = painterResource(R.drawable.wheel_roulette),
+                painter = painterResource(iconRes),
                 contentDescription = "照片轮盘",
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        if (dc.isDark) { scaleX = 1.25f; scaleY = 1.25f }
-                    },
+                modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
             )
         }
@@ -134,6 +134,17 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
     val inProgress = session != null && remaining > 0
     val count = if (inProgress) remaining else state.settings.dailyCount
     val preview: PhotoEntity? = session?.queue?.firstOrNull()
+    val gradient = if (dc.isDark) {
+        Brush.verticalGradient(listOf(Color(0xFF27949B), Color(0xFF205F5E)))
+    } else {
+        Brush.verticalGradient(listOf(Color(0xFF589FFF), Color(0xFF448DF8)))
+    }
+    val onClick = if (state.total == 0 && !state.loading) onScan else onStart
+    val label = when {
+        state.total == 0 && !state.loading -> "扫描相册"
+        inProgress -> "继续整理"
+        else -> "开始整理"
+    }
 
     Column(Modifier.fillMaxWidth()) {
         Text("今日任务", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = dc.ink)
@@ -149,13 +160,23 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(
-                            "$count 张照片",
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = dc.ink,
-                            maxLines = 1
-                        )
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text(
+                                "$count",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = dc.accentText,
+                                maxLines = 1
+                            )
+                            Spacer(Modifier.width(2.dp))
+                            Text(
+                                "张照片",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = dc.ink,
+                                maxLines = 1
+                            )
+                        }
                         Spacer(Modifier.height(3.dp))
                         Text(
                             if (state.loading) "正在加载照片队列…"
@@ -172,7 +193,7 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
                     Box(
                         Modifier
                             .weight(1f)
-                            .height(78.dp)
+                            .height(86.dp)
                             .clip(RoundedCornerShape(14.dp))
                             .background(dc.white)
                     ) {
@@ -201,29 +222,22 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
                         }
                     }
                 }
-                Spacer(Modifier.height(10.dp))
-                // The hero action: the single most prominent control on the home screen.
-                if (state.total == 0 && !state.loading) {
-                    Button(
-                        onClick = onScan,
-                        Modifier.fillMaxWidth().height(48.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White)
-                    ) {
-                        Text("扫描相册", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(12.dp))
+                // The hero action lives inside the task card: a full-width gradient button
+                // (light: blue gradient, dark: teal gradient).
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(gradient)
+                        .clickable(onClick = onClick),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
                         Spacer(Modifier.width(6.dp))
-                        Icon(Icons.AutoMirrored.Filled.ArrowForward, null, modifier = Modifier.size(18.dp))
-                    }
-                } else {
-                    Button(
-                        onClick = onStart,
-                        Modifier.fillMaxWidth().height(48.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White)
-                    ) {
-                        Text(if (inProgress) "继续整理" else "开始整理", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.width(6.dp))
-                        Icon(Icons.AutoMirrored.Filled.ArrowForward, null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = Color.White, modifier = Modifier.size(18.dp))
                     }
                 }
             }
@@ -239,10 +253,15 @@ private fun ProgressSection(state: AppUiState) {
     val ratio = if (total > 0) (processed.toFloat() / total).coerceIn(0f, 1f) else 0f
     val daysLeft = if (state.settings.dailyCount > 0)
         ((total - processed).toDouble() / state.settings.dailyCount).let { kotlin.math.ceil(it).toInt() } else 0
+    val fill = if (dc.isDark) {
+        Brush.horizontalGradient(listOf(Color(0xFF2B8F8A), Color(0xFF236969)))
+    } else {
+        Brush.horizontalGradient(listOf(Color(0xFF589FFF), Color(0xFF448DF8)))
+    }
 
     Card(
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = dc.cardSoft),
+        colors = CardDefaults.cardColors(containerColor = dc.card),
         elevation = CardDefaults.cardElevation(0.dp)
     ) {
         Column(Modifier.fillMaxWidth().padding(14.dp)) {
@@ -269,7 +288,7 @@ private fun ProgressSection(state: AppUiState) {
                         .fillMaxHeight()
                         .fillMaxWidth(ratio)
                         .clip(CircleShape)
-                        .background(dc.accent)
+                        .background(fill)
                 )
             }
             Spacer(Modifier.height(6.dp))
@@ -290,7 +309,7 @@ private fun StatsRow(state: AppUiState) {
     val keepPct = if (processed > 0) (stats.kept * 100.0 / processed).roundToInt() else 0
     Card(
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = dc.cardSoft),
+        colors = CardDefaults.cardColors(containerColor = dc.card),
         elevation = CardDefaults.cardElevation(0.dp)
     ) {
         Row(
@@ -426,7 +445,7 @@ private fun MemoryCard(state: AppUiState, onOpenMemory: () -> Unit) {
                         memory.photos.take(2).forEach { photo ->
                             Box(
                                 Modifier
-                                    .size(46.dp)
+                                    .size(40.dp)
                                     .clip(RoundedCornerShape(12.dp))
                                     .background(dc.white)
                             ) {
@@ -441,7 +460,7 @@ private fun MemoryCard(state: AppUiState, onOpenMemory: () -> Unit) {
                         if (memory.count > 2) {
                             Box(
                                 Modifier
-                                    .size(46.dp)
+                                    .size(40.dp)
                                     .clip(RoundedCornerShape(12.dp))
                                     .background(dc.accent),
                                 contentAlignment = Alignment.Center

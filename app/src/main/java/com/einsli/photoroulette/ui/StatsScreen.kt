@@ -61,7 +61,7 @@ fun StatsScreen(state: AppUiState) {
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
     ) {
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(18.dp))
         Text("统计", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = dc.ink)
         Spacer(Modifier.height(14.dp))
 
@@ -90,7 +90,7 @@ fun StatsScreen(state: AppUiState) {
         // ── 整理进度 ──
         Card(
             shape = RoundedCornerShape(22.dp),
-            colors = CardDefaults.cardColors(containerColor = dc.cardSoft),
+            colors = CardDefaults.cardColors(containerColor = dc.card),
             elevation = CardDefaults.cardElevation(0.dp)
         ) {
             Column(Modifier.fillMaxWidth().padding(16.dp)) {
@@ -150,7 +150,7 @@ fun StatsScreen(state: AppUiState) {
         Spacer(Modifier.height(14.dp))
         Card(
             shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = dc.cardSoft),
+            colors = CardDefaults.cardColors(containerColor = dc.card),
             elevation = CardDefaults.cardElevation(0.dp)
         ) {
             Column(Modifier.fillMaxWidth().padding(16.dp)) {

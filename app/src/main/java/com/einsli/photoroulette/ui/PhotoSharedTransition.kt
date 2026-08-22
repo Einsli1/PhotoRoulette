@@ -32,7 +32,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -56,7 +55,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import coil.imageLoader
 import coil.request.ImageRequest
 import coil.size.Size as CoilSize
 import com.einsli.photoroulette.data.PhotoEntity
@@ -107,9 +105,9 @@ fun PhotoSharedTransitionLayout(
  * full-screen Crop flash it therefore crossfades from Fit (matching the preview at the start) to
  * [contentScale] (Crop by default, the cell's resting look) as the grid branch enters.
  *
- * The photo is also preloaded at the preview's request size (the screen size) as soon as the cell
- * is composed, so the very first open of the preview never shows a blank flash while Coil decodes
- * the full-screen bitmap.
+ * The resting cell only loads a small Crop thumbnail. The full-screen Fit copy is composed only
+ * while the return transition is running and reuses the preview's screen-size cache entry, so the
+ * grid stays cheap to scroll and the return has no decode flash.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -122,14 +120,7 @@ fun SharedTransitionScope.SharedGridImage(
 ) {
     val state = rememberSharedContentState(photoSharedKey(photo.mediaId))
     val context = LocalContext.current
-    val loader = context.imageLoader
     val previewSize = rememberScreenPixelSize()
-    DisposableEffect(photo.uri, previewSize) {
-        val disposable = loader.enqueue(
-            ImageRequest.Builder(context).data(photo.uri).size(previewSize).build()
-        )
-        onDispose { disposable.dispose() }
-    }
     // While the grid branch is entering (the return transition) this goes 0 → 1 in step with the
     // shared-element bounds animation. The shared element is the ONLY thing rendered during the
     // transition and it animates from the preview's full-screen bounds down to this cell, so it
@@ -147,14 +138,21 @@ fun SharedTransitionScope.SharedGridImage(
             )
             .clip(RoundedCornerShape(animatedRadius))
     ) {
-        // Fit copy: matches the preview at the start of the return, then fades out.
-        AsyncImage(
-            photo.uri,
-            photo.displayName,
-            Modifier.fillMaxSize().alpha(1f - morph),
-            contentScale = ContentScale.Fit,
-        )
-        // Crop copy: fades in as the photo lands, giving the cell its 裁满 look.
+        // Fit copy: only composed while the return transition runs (morph < 1). It uses the same
+        // fixed screen-size request as the preview, so it hits the preview's memory-cache entry
+        // immediately instead of re-decoding. At rest it is not composed, so fast grid scrolling
+        // only decodes the small Crop thumbnail below.
+        if (morph < 1f) {
+            AsyncImage(
+                model = remember(photo.uri, previewSize) {
+                    ImageRequest.Builder(context).data(photo.uri).size(previewSize).build()
+                },
+                contentDescription = photo.displayName,
+                modifier = Modifier.fillMaxSize().alpha(1f - morph),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        // Crop copy: the resting thumbnail (cell size), fades in as the photo lands.
         AsyncImage(
             photo.uri,
             photo.displayName,
@@ -333,13 +331,16 @@ fun SharedTransitionScope.SharedPhotoPreview(
             ) {
                 // Copy of the current photo in the source scale (Crop for the grids, Fit for the
                 // review card): matches the cell/card at the start of the open transition, then
-                // fades out as the photo expands to full-screen.
-                AsyncImage(
-                    currentPhoto.uri,
-                    currentPhoto.displayName,
-                    Modifier.fillMaxSize().alpha(1f - morph),
-                    contentScale = sourceContentScale,
-                )
+                // fades out as the photo expands to full-screen. Only composed while the open
+                // transition runs, so the resting preview does not waste a full-screen decode.
+                if (morph < 1f) {
+                    AsyncImage(
+                        currentPhoto.uri,
+                        currentPhoto.displayName,
+                        Modifier.fillMaxSize().alpha(1f - morph),
+                        contentScale = sourceContentScale,
+                    )
+                }
                 HorizontalPager(
                     state = pagerState,
                     modifier = Modifier.fillMaxSize().alpha(morph),
