@@ -339,14 +339,18 @@ fun SharedTransitionScope.SharedPhotoPreview(
                                     },
                                     onDragEnd = {
                                         if (dragY > dismissThreshold) {
-                                            // Settle back to center first so the shared element
-                                            // return never starts from a displaced position.
+                                            // Start the return immediately FROM the released
+                                            // position: requestClose() kicks off the shared-
+                                            // element flight back to the grid cell while dragY
+                                            // animates to 0 over the same duration and easing, so
+                                            // the photo keeps moving from where it was released
+                                            // instead of snapping back to center first.
+                                            requestClose()
                                             scope.launch {
                                                 val start = dragY
-                                                animate(0f, 1f, animationSpec = tween(160)) { p, _ ->
+                                                animate(0f, 1f, animationSpec = tween(PhotoTransitionMillis, easing = FastOutSlowInEasing)) { p, _ ->
                                                     dragY = start * (1f - p)
                                                 }
-                                                requestClose()
                                             }
                                         } else {
                                             scope.launch {
