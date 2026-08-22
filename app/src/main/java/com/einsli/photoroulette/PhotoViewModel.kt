@@ -85,7 +85,11 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     // produce none.
     private val touchMarginMs = 200L
     private var cardShownAt = 0L
-    private val undoStack = ArrayDeque<Pair<PhotoEntity, PhotoState>>()
+    // The undo stack records each action's OWN direction. Negating the session's current
+    // lastActionDir instead would alternate right/left across consecutive undos (5 keeps then 5
+    // undos would return from 右→左→右→左), which is exactly the "左一张右一张" the user saw.
+    private class UndoEntry(val photo: PhotoEntity, val oldState: PhotoState, val dir: Int)
+    private val undoStack = ArrayDeque<UndoEntry>()
     private val counts = combine(repository.totalCount, repository.processedCount) { total, processed -> total to processed }
     val trashItems: Flow<List<PhotoEntity>> = repository.trashItems
     private val homeStats = combine(
@@ -191,7 +195,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         ghostLockUntil = 0L
         cardShownAt = now
         lastActionAt = now
-        undoStack.addLast(photo to photo.state)
+        undoStack.addLast(UndoEntry(photo, photo.state, dir))
         val queueIds = cur.queue.map { it.mediaId }
         viewModelScope.launch {
             repository.apply(photo, state)
@@ -201,16 +205,20 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     }
 
     fun undo() {
-        val (photo, oldState) = undoStack.removeLastOrNull() ?: run {
+        val entry = undoStack.removeLastOrNull() ?: run {
             Log.d(TAG, "undo: empty stack, ignoring")
             return
         }
+        val photo = entry.photo
+        val oldState = entry.oldState
         val cur = session.value
         if (cur == null) { Log.d(TAG, "undo: no session"); return }
         val idx = cur.queue.indexOfFirst { it.mediaId == photo.mediaId }
         if (idx < 0) { Log.d(TAG, "undo: photo not in queue"); return }
-        Log.d(TAG, "undo: position ${cur.position} → $idx, dir ${cur.lastActionDir} → ${-cur.lastActionDir}")
-        session.value = cur.copy(position = idx, lastActionDir = -cur.lastActionDir)
+        // lastActionDir comes from THIS action's own direction (negated), not the session's
+        // current one — consecutive undos must each recall their own swipe side.
+        Log.d(TAG, "undo: position ${cur.position} → $idx, dir ${cur.lastActionDir} → ${-entry.dir}")
+        session.value = cur.copy(position = idx, lastActionDir = -entry.dir)
         ghostPhotoId = 0L
         ghostLockUntil = 0L
         cardShownAt = SystemClock.elapsedRealtime()
