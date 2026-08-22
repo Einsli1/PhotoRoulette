@@ -2,7 +2,9 @@ package com.einsli.photoroulette.ui
 
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -14,9 +16,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -24,6 +28,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import coil.compose.AsyncImage
+import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import com.einsli.photoroulette.data.PhotoEntity
 
@@ -41,6 +46,7 @@ fun ZoomablePhoto(
     enabled: Boolean = true,
     resetTick: Int = 0,
     onResetDone: () -> Unit = {},
+    placeholderRequest: ImageRequest? = null,
 ) {
     var scale by remember(photo.mediaId) { mutableFloatStateOf(1f) }
     var offsetX by remember(photo.mediaId) { mutableFloatStateOf(0f) }
@@ -82,15 +88,53 @@ fun ZoomablePhoto(
             .clipToBounds()
             .onSizeChanged { viewportW = it.width; viewportH = it.height }
     ) {
+        // Cached source thumbnail (the cell/card's bitmap) under the full-screen copy: on the
+        // first open it is already loaded, so the preview never shows a blank gap while the
+        // full-res decode runs. Follows the same zoom/pan transform as the main image.
+        if (placeholderRequest != null) {
+            var placeholderReady by remember(photo.mediaId, placeholderRequest) { mutableStateOf(false) }
+            val placeholderPainter = rememberAsyncImagePainter(
+                placeholderRequest,
+                onSuccess = { placeholderReady = true },
+                contentScale = ContentScale.Fit,
+            )
+            val placeholderAlpha by animateFloatAsState(
+                targetValue = if (placeholderReady) 1f else 0f,
+                animationSpec = tween(180),
+                label = "placeholderAlpha",
+            )
+            Image(
+                painter = placeholderPainter,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = scale; scaleY = scale
+                        translationX = offsetX; translationY = offsetY
+                    }
+                    .alpha(placeholderAlpha),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        // Full-screen copy: fades in over the placeholder once decoded (instant on cache hits,
+        // so repeat opens are unchanged).
+        var fullReady by remember(photo.mediaId) { mutableStateOf(false) }
+        val fullAlpha by animateFloatAsState(
+            targetValue = if (fullReady) 1f else 0f,
+            animationSpec = tween(180),
+            label = "fullAlpha",
+        )
         AsyncImage(
             model = request,
             contentDescription = photo.displayName,
+            onSuccess = { fullReady = true },
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
                     scaleX = scale; scaleY = scale
                     translationX = offsetX; translationY = offsetY
                 }
+                .alpha(fullAlpha)
                 .pointerInput(photo.mediaId, enabled) {
                     if (!enabled) return@pointerInput
                     awaitEachGesture {

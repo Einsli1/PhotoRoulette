@@ -484,6 +484,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                         animatedRadius = photoBranchRadius(gridCornerRadius = 8.dp, gridSide = false),
                         animatedVisibilityScope = this@AnimatedContent,
                         swipeDownToClose = true,
+                        sourceThumbSize = gridThumbSize,
                         onClose = { current ->
                             scope.launch {
                                 val idx = items.indexOfFirst { it.mediaId == current.mediaId }
@@ -532,6 +533,17 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     }
     val dc = designColors()
     val current = session?.current
+    // Fixed thumbnail size shared by the card, the preview's source-scale copy and the preview
+    // placeholder, so the first preview open reuses the already-loaded card bitmap instead of
+    // showing a blank gap while the full-screen copy decodes.
+    val config = LocalConfiguration.current
+    val density = LocalDensity.current.density
+    val cardThumbSize = remember {
+        CoilSize(
+            (config.screenWidthDp * density).roundToInt(),
+            ((config.screenHeightDp - 190).coerceAtLeast(240) * density).roundToInt(),
+        )
+    }
     PhotoSharedTransitionLayout {
         Box(Modifier.fillMaxSize()) {
             AnimatedContent(
@@ -574,7 +586,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                 Button(onClick = onDone, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White)) { Text("处理删除并继续整理") }
                             }
                             else -> Box(Modifier.fillMaxWidth().weight(1f)) {
-                                SwipePhoto(s, onAction, onUndo, animatedRadius = radius, animatedVisibilityScope = this@AnimatedContent, onTapPhoto = { previewOpen = true })
+                                SwipePhoto(s, onAction, onUndo, animatedRadius = radius, animatedVisibilityScope = this@AnimatedContent, cardThumbSize = cardThumbSize, onTapPhoto = { previewOpen = true })
                             }
                         }
                     }
@@ -587,6 +599,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                             animatedRadius = photoBranchRadius(gridCornerRadius = 20.dp, gridSide = false),
                             animatedVisibilityScope = this@AnimatedContent,
                             sourceContentScale = ContentScale.Fit,
+                            sourceThumbSize = cardThumbSize,
                             onClose = { previewOpen = false },
                         )
                     }
@@ -600,7 +613,7 @@ private fun formatTaken(taken: Long): String =
     if (taken <= 0L) "" else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(taken))
 
 @OptIn(ExperimentalSharedTransitionApi::class)
-@Composable private fun SharedTransitionScope.SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, animatedRadius: Dp, animatedVisibilityScope: AnimatedVisibilityScope, onTapPhoto: (PhotoEntity) -> Unit) {
+@Composable private fun SharedTransitionScope.SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, animatedRadius: Dp, animatedVisibilityScope: AnimatedVisibilityScope, cardThumbSize: CoilSize, onTapPhoto: (PhotoEntity) -> Unit) {
     val dc = designColors()
     val photo = session.current!!
     val next = session.queue.getOrNull(session.position + 1)
@@ -753,7 +766,7 @@ private fun formatTaken(taken: Long): String =
                         detectTapGestures(onTap = { onTapPhoto(photo) })
                     }
             ) {
-                SharedGridImage(photo, animatedRadius, animatedVisibilityScope, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                SharedGridImage(photo, animatedRadius, animatedVisibilityScope, Modifier.fillMaxSize(), contentScale = ContentScale.Fit, gridSize = cardThumbSize)
                 VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 48.dp, textSize = 12)
             }
             // Flying-out card on top (rendered last = topmost), so it visibly slides off over
@@ -1288,6 +1301,7 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                         initialIndex = target,
                         animatedRadius = photoBranchRadius(gridCornerRadius = 12.dp, gridSide = false),
                         animatedVisibilityScope = this@AnimatedContent,
+                        sourceThumbSize = gridThumbSize,
                         onClose = { current ->
                             scope.launch {
                                 val idx = photos.indexOfFirst { it.mediaId == current.mediaId }

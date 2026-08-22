@@ -2,6 +2,8 @@ package com.einsli.photoroulette.ui
 
 import android.net.Uri
 import android.widget.VideoView
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -136,6 +138,7 @@ fun VideoPhoto(
     active: Boolean = true,
     resetTick: Int = 0,
     onResetDone: () -> Unit = {},
+    placeholderRequest: ImageRequest? = null,
 ) {
     val context = LocalContext.current
     var videoView by remember { mutableStateOf<VideoView?>(null) }
@@ -211,11 +214,27 @@ fun VideoPhoto(
     }
 
     Box(modifier.fillMaxSize().background(Color.Black)) {
-        // Frame thumbnail under the player until the first frame is decoded and playing.
+        // Cached source thumbnail (the cell/card's bitmap): instant on the first open, covers
+        // the decode gap of the sharper frame below.
+        if (placeholderRequest != null) {
+            Image(
+                painter = rememberAsyncImagePainter(placeholderRequest),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        // Sharper frame shown while the video prepares; fades in once decoded.
+        var thumbReady by remember(photo.mediaId, thumbRequest) { mutableStateOf(false) }
+        val thumbAlpha by animateFloatAsState(
+            targetValue = if (thumbReady && !prepared) 1f else 0f,
+            animationSpec = tween(180),
+            label = "videoThumbAlpha",
+        )
         Image(
-            painter = rememberAsyncImagePainter(thumbRequest),
+            painter = rememberAsyncImagePainter(thumbRequest, onSuccess = { thumbReady = true }),
             contentDescription = photo.displayName,
-            modifier = Modifier.fillMaxSize().then(if (prepared) Modifier.alpha(0f) else Modifier),
+            modifier = Modifier.fillMaxSize().alpha(thumbAlpha),
             contentScale = ContentScale.Fit,
         )
         AndroidView(

@@ -89,6 +89,19 @@ internal fun rememberScreenPixelSize(): CoilSize {
     }
 }
 
+/**
+ * The thumbnail request shared by a photo's grid/card cell, the preview's source-scale copy and
+ * the preview's placeholder. Data + size + parameters are IDENTICAL in all three places so they
+ * hit the SAME memory-cache entry: the first preview open then shows the already-loaded cell
+ * bitmap instead of a blank gap while the full-screen copy decodes. Videos decode a
+ * representative frame (1s in) instead of the often-black first frame.
+ */
+internal fun photoThumbRequest(context: android.content.Context, photo: PhotoEntity, size: CoilSize? = null): ImageRequest =
+    ImageRequest.Builder(context).data(photo.uri).apply {
+        if (size != null) size(size)
+        if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
+    }.build()
+
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun PhotoSharedTransitionLayout(
@@ -139,13 +152,7 @@ fun SharedTransitionScope.SharedGridImage(
     ) { s -> if (s == EnterExitState.Visible) 1f else 0f }
     // Resting thumbnail: fixed cell-size request (when [gridSize] is provided) so grid scrolling
     // decodes only the small bitmap and hits a stable memory-cache entry. Fades in on success.
-    val thumbRequest = remember(photo.uri, gridSize) {
-        ImageRequest.Builder(context).data(photo.uri).apply {
-            if (gridSize != null) size(gridSize)
-            // Videos decode a representative frame (1s in) instead of the often-black first frame.
-            if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
-        }.build()
-    }
+    val thumbRequest = remember(photo.uri, gridSize) { photoThumbRequest(context, photo, gridSize) }
     var thumbReady by remember(photo.uri, gridSize) { mutableStateOf(false) }
     val thumbPainter = rememberAsyncImagePainter(
         thumbRequest,
@@ -241,6 +248,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
     swipeDownToClose: Boolean = false,
     bottomControls: (@Composable (current: PhotoEntity) -> Unit)? = null,
     sourceContentScale: ContentScale = ContentScale.Crop,
+    sourceThumbSize: CoilSize? = null,
 ) {
     // Capture the list for this preview session: an in-preview restore/delete (which changes the
     // page's list) never yanks the pager out from under the exit animation.
@@ -365,10 +373,11 @@ fun SharedTransitionScope.SharedPhotoPreview(
                 // fades out as the photo expands to full-screen. Only composed while the open
                 // transition runs, so the resting preview does not waste a full-screen decode.
                 if (morph < 1f) {
-                    val copyRequest = remember(currentPhoto.uri) {
-                        ImageRequest.Builder(context).data(currentPhoto.uri).apply {
-                            if (currentPhoto.mimeType.startsWith("video/")) videoFrameMillis(1000)
-                        }.build()
+                    // Same request key as the source cell/card thumbnail (data + size + frame
+                    // param), so this copy is an instant cache hit and the open transition starts
+                    // from the already-loaded thumbnail instead of a blank area.
+                    val copyRequest = remember(currentPhoto.uri, sourceThumbSize) {
+                        photoThumbRequest(context, currentPhoto, sourceThumbSize)
                     }
                     AsyncImage(
                         copyRequest,
@@ -382,12 +391,19 @@ fun SharedTransitionScope.SharedPhotoPreview(
                     modifier = Modifier.fillMaxSize().alpha(morph),
                 ) { page ->
                     val p = openPhotos[page]
+                    // The preview's placeholder is the source cell/card thumbnail (same key as
+                    // the grid side), so the first open shows it instantly while the full-screen
+                    // copy decodes in the background.
+                    val placeholder = remember(p.mediaId, sourceThumbSize) {
+                        sourceThumbSize?.let { photoThumbRequest(context, p, it) }
+                    }
                     if (p.mimeType.startsWith("video/")) {
                         VideoPhoto(
                             photo = p,
                             active = pagerState.currentPage == page,
                             resetTick = zoomResetTick,
                             onResetDone = { if (closePending) onClose(currentPhoto) },
+                            placeholderRequest = placeholder,
                         )
                     } else {
                         ZoomablePhoto(
@@ -395,6 +411,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
                             enabled = !transitionActive,
                             resetTick = zoomResetTick,
                             onResetDone = { if (closePending) onClose(currentPhoto) },
+                            placeholderRequest = placeholder,
                         )
                     }
                 }
