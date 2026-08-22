@@ -149,7 +149,26 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
     }
 
     Column(Modifier.fillMaxWidth()) {
-        Text("今日任务", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+        // Small accent bar left of the title, matching the design mockups (dark.png: ~#2680C4,
+        // light.png: the light blue). 
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .width(4.dp)
+                    .height(18.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(
+                        // Vertical gradient, brighter at the top, deeper at the bottom.
+                        if (dc.isDark) {
+                            Brush.verticalGradient(listOf(Color(0xFF3AA0EA), Color(0xFF1F6FB8)))
+                        } else {
+                            Brush.verticalGradient(listOf(Color(0xFF7FB0F8), Color(0xFF3F82EE)))
+                        }
+                    )
+            )
+            Spacer(Modifier.width(7.dp))
+            Text("今日任务", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+        }
         Spacer(Modifier.height(6.dp))
         Card(
             shape = RoundedCornerShape(22.dp),
@@ -167,7 +186,9 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
                                 "$count",
                                 fontSize = 24.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = dc.accentText,
+                                // dark.png shows the count in a bright blue (#2B9BED family);
+                                // light mode keeps the light accent blue.
+                                color = if (dc.isDark) Color(0xFF2B9BED) else dc.accentText,
                                 maxLines = 1
                             )
                             Spacer(Modifier.width(2.dp))
