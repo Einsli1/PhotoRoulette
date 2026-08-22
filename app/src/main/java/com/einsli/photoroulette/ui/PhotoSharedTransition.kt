@@ -288,47 +288,8 @@ fun SharedTransitionScope.SharedPhotoPreview(
     Box(
         modifier
             .fillMaxSize()
-            .graphicsLayer { translationY = dragY }
-            .then(
-                if (swipeDownToClose) {
-                    Modifier.pointerInput(Unit) {
-                        detectVerticalDragGestures(
-                            onVerticalDrag = { change, amount ->
-                                // Downward drags pull the preview down; upward ones snap back.
-                                if (amount > 0f || dragY > 0f) {
-                                    dragY += amount
-                                    change.consume()
-                                }
-                            },
-                            onDragEnd = {
-                                if (dragY > dismissThreshold) {
-                                    // Settle back to center first so the shared element return
-                                    // never starts from a displaced position.
-                                    scope.launch {
-                                        val start = dragY
-                                        animate(0f, 1f, animationSpec = tween(160)) { p, _ ->
-                                            dragY = start * (1f - p)
-                                        }
-                                        requestClose()
-                                    }
-                                } else {
-                                    scope.launch {
-                                        val start = dragY
-                                        animate(0f, 1f, animationSpec = tween(220, easing = FastOutSlowInEasing)) { p, _ ->
-                                            dragY = start * (1f - p)
-                                        }
-                                    }
-                                }
-                            },
-                            onDragCancel = { dragY = 0f },
-                        )
-                    }
-                } else {
-                    Modifier
-                }
-            )
     ) {
-        // Black background (fades with the branch transition).
+        // Black background (fades with the branch transition) — stays fixed on dismiss drags.
         Box(Modifier.fillMaxSize().background(Color.Black))
         Column(Modifier.fillMaxSize().systemBarsPadding()) {
             Row(
@@ -356,11 +317,53 @@ fun SharedTransitionScope.SharedPhotoPreview(
                 )
             }
             // Photo area — the shared element (only the photo). Between the header and the
-            // controls so long photos never extend under the buttons.
+            // controls so long photos never extend under the buttons. On swipe-down dismiss
+            // ONLY this slides down: the header and controls stay put, and because the controls
+            // are drawn after (on top), the sliding photo passes UNDER them and never blocks
+            // the buttons.
             Box(
                 Modifier
                     .fillMaxWidth()
                     .weight(1f)
+                    .graphicsLayer { translationY = dragY }
+                    .then(
+                        if (swipeDownToClose) {
+                            Modifier.pointerInput(Unit) {
+                                detectVerticalDragGestures(
+                                    onVerticalDrag = { change, amount ->
+                                        // Downward drags pull the photo down; upward ones snap back.
+                                        if (amount > 0f || dragY > 0f) {
+                                            dragY += amount
+                                            change.consume()
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        if (dragY > dismissThreshold) {
+                                            // Settle back to center first so the shared element
+                                            // return never starts from a displaced position.
+                                            scope.launch {
+                                                val start = dragY
+                                                animate(0f, 1f, animationSpec = tween(160)) { p, _ ->
+                                                    dragY = start * (1f - p)
+                                                }
+                                                requestClose()
+                                            }
+                                        } else {
+                                            scope.launch {
+                                                val start = dragY
+                                                animate(0f, 1f, animationSpec = tween(220, easing = FastOutSlowInEasing)) { p, _ ->
+                                                    dragY = start * (1f - p)
+                                                }
+                                            }
+                                        }
+                                    },
+                                    onDragCancel = { dragY = 0f },
+                                )
+                            }
+                        } else {
+                            Modifier
+                        }
+                    )
                     .sharedElement(
                         state,
                         animatedVisibilityScope,

@@ -132,7 +132,10 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
     val remaining = state.remaining
     val inProgress = session != null && remaining > 0
     val count = if (inProgress) remaining else state.settings.dailyCount
-    val preview: PhotoEntity? = session?.queue?.firstOrNull()
+    // Mid-session the preview shows the photo the user is CURRENTLY on (the queue advances as
+    // they organize, so exiting halfway and returning shows where they left off); when no
+    // session is in progress, fall back to the first of the group.
+    val preview: PhotoEntity? = session?.current ?: session?.queue?.firstOrNull()
     val gradient = if (dc.isDark) {
         Brush.verticalGradient(listOf(Color(0xFF27949B), Color(0xFF205F5E)))
     } else {
