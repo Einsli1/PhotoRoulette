@@ -270,7 +270,15 @@ private fun PageContent(
     onScan: () -> Unit,
 ) {
     when (page) {
-        0 -> Home(state, onStart = { viewModel.reload(); onNavigate(2) }, onScan = onScan, onOpenMemory = { onNavigate(5) })
+        0 -> Home(state, onStart = {
+            // A session already in progress must stay untouched: reload() nulls it first and
+            // rebuilds asynchronously, which makes the 今日任务 card flicker (加载中 / 暂无图片 /
+            // 总数量) while the Review page zooms in. Only rebuild when there is nothing to
+            // continue; an in-progress session goes straight to the Review page as-is.
+            val inProgress = state.session != null && state.remaining > 0
+            if (!inProgress) viewModel.reload()
+            onNavigate(2)
+        }, onScan = onScan, onOpenMemory = { onNavigate(5) })
         1 -> Settings(state.settings, viewModel, scrollState = settingsScroll, savedScroll = savedSettingsScroll, openTrash = { onNavigate(3) })
         3 -> RecycleBin(trashItems, viewModel, onRestore = onRestoreFromTrash, onBack = { onNavigate(1) })
         4 -> StatsScreen(state)
