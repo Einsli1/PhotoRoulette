@@ -11,6 +11,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -55,6 +56,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import coil.size.Size as CoilSize
 import com.einsli.photoroulette.data.PhotoEntity
@@ -105,9 +107,13 @@ fun PhotoSharedTransitionLayout(
  * full-screen Crop flash it therefore crossfades from Fit (matching the preview at the start) to
  * [contentScale] (Crop by default, the cell's resting look) as the grid branch enters.
  *
- * The resting cell only loads a small Crop thumbnail. The full-screen Fit copy is composed only
+ * The resting cell loads a small Crop thumbnail. The full-screen Fit copy is composed only
  * while the return transition is running and reuses the preview's screen-size cache entry, so the
  * grid stays cheap to scroll and the return has no decode flash.
+ *
+ * [gridSize] fixes the decode size for the resting thumbnail (in pixels). Passing the cell size
+ * makes grid scrolling decode small bitmaps only — fast to load and one stable memory-cache entry
+ * per photo — and the thumbnail fades in once decoded instead of flashing the placeholder.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -117,6 +123,7 @@ fun SharedTransitionScope.SharedGridImage(
     animatedVisibilityScope: AnimatedVisibilityScope,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
+    gridSize: CoilSize? = null,
 ) {
     val state = rememberSharedContentState(photoSharedKey(photo.mediaId))
     val context = LocalContext.current
@@ -129,6 +136,24 @@ fun SharedTransitionScope.SharedGridImage(
         transitionSpec = { tween(PhotoTransitionMillis, easing = FastOutSlowInEasing) },
         label = "gridMorph",
     ) { s -> if (s == EnterExitState.Visible) 1f else 0f }
+    // Resting thumbnail: fixed cell-size request (when [gridSize] is provided) so grid scrolling
+    // decodes only the small bitmap and hits a stable memory-cache entry. Fades in on success.
+    val thumbRequest = remember(photo.uri, gridSize) {
+        ImageRequest.Builder(context).data(photo.uri).apply {
+            if (gridSize != null) size(gridSize)
+        }.build()
+    }
+    var thumbReady by remember(photo.uri, gridSize) { mutableStateOf(false) }
+    val thumbPainter = rememberAsyncImagePainter(
+        thumbRequest,
+        onSuccess = { thumbReady = true },
+        contentScale = contentScale,
+    )
+    val thumbAlpha by animateFloatAsState(
+        targetValue = if (thumbReady) 1f else 0f,
+        animationSpec = tween(180),
+        label = "thumbAlpha",
+    )
     Box(
         modifier
             .sharedElement(
@@ -153,10 +178,10 @@ fun SharedTransitionScope.SharedGridImage(
             )
         }
         // Crop copy: the resting thumbnail (cell size), fades in as the photo lands.
-        AsyncImage(
-            photo.uri,
-            photo.displayName,
-            Modifier.fillMaxSize().alpha(morph),
+        androidx.compose.foundation.Image(
+            painter = thumbPainter,
+            contentDescription = photo.displayName,
+            modifier = Modifier.fillMaxSize().alpha(morph * thumbAlpha),
             contentScale = contentScale,
         )
     }

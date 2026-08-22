@@ -170,39 +170,60 @@ fun StatsScreen(state: AppUiState) {
     }
 }
 
-/** Simple Material-3 style bar chart: last 7 days, oldest first, today highlighted. */
+/** Simple Material-3 style bar chart: last 7 days, oldest first, today highlighted.
+ *  The plot area (bars) has a fixed height and the weekday labels sit on a fixed baseline,
+ *  so tall bars never push the labels down. */
 @Composable
 private fun WeekTrendChart(days: List<Int>) {
     val dc = designColors()
     val maxCount = (days.maxOrNull() ?: 0).coerceAtLeast(1)
     val today = LocalDate.now()
-    Row(
-        Modifier.fillMaxWidth().height(110.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.Bottom
-    ) {
-        days.forEachIndexed { i, count ->
-            val d = today.minusDays((6 - i).toLong())
-            val isToday = i == days.size - 1
-            val barHeight = if (count > 0) {
-                (64.dp * (count.toFloat() / maxCount)).coerceAtLeast(4.dp)
-            } else 0.dp
-            Column(
-                Modifier.weight(1f).fillMaxHeight(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Spacer(Modifier.weight(1f))
-                Text("$count", fontSize = 9.sp, color = if (isToday) dc.accentText else dc.labelGray)
-                Spacer(Modifier.height(2.dp))
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(barHeight)
-                        .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
-                        .background(if (isToday) dc.accent else dc.accent.copy(alpha = 0.4f))
+    Column(Modifier.fillMaxWidth()) {
+        // Fixed-height plot area: value labels + bars, bottom-aligned.
+        Row(
+            Modifier.fillMaxWidth().height(86.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            days.forEachIndexed { i, count ->
+                val d = today.minusDays((6 - i).toLong())
+                val isToday = i == days.size - 1
+                val barHeight = if (count > 0) {
+                    (56.dp * (count.toFloat() / maxCount)).coerceAtLeast(3.dp)
+                } else 0.dp
+                Column(
+                    Modifier.weight(1f).fillMaxHeight(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Spacer(Modifier.weight(1f))
+                    Text("$count", fontSize = 9.sp, color = if (isToday) dc.accentText else dc.labelGray)
+                    Spacer(Modifier.height(2.dp))
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(barHeight)
+                            .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
+                            .background(if (isToday) dc.accent else dc.accent.copy(alpha = 0.4f))
+                    )
+                }
+            }
+        }
+        // Fixed baseline: weekday labels always on the same line below the bars.
+        Spacer(Modifier.height(5.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            days.forEachIndexed { i, _ ->
+                val d = today.minusDays((6 - i).toLong())
+                val isToday = i == days.size - 1
+                Text(
+                    weekdayLabel(d.dayOfWeek),
+                    fontSize = 10.sp,
+                    color = if (isToday) dc.accentText else dc.labelGray,
+                    modifier = Modifier.weight(1f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
                 )
-                Spacer(Modifier.height(5.dp))
-                Text(weekdayLabel(d.dayOfWeek), fontSize = 10.sp, color = if (isToday) dc.accentText else dc.labelGray)
             }
         }
     }

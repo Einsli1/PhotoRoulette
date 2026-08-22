@@ -36,6 +36,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -54,6 +55,10 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import coil.imageLoader
+import coil.request.ImageRequest
+import coil.size.Size as CoilSize
+import kotlin.math.roundToInt
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -62,8 +67,10 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.snapshotFlow
 import com.einsli.photoroulette.AppUiState
 import com.einsli.photoroulette.PhotoViewModel
 import com.einsli.photoroulette.MemoryInfo
@@ -336,6 +343,51 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     // BackHandler (composed later) wins and closes the preview first.
     BackHandler(onBack = onBack)
     val gridState = rememberLazyGridState()
+    // Cell-sized decode target for grid thumbnails: 3 columns, so ~screenWidth/3 px. Fixing the
+    // request size keeps every cell's memory-cache entry identical and small, so fast scrolling
+    // re-shows already-loaded photos instantly instead of re-decoding.
+    val gridCellPx = with(LocalDensity.current) {
+        (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
+    }
+    val gridThumbSize = remember(gridCellPx) { CoilSize(gridCellPx, gridCellPx) }
+    // Preload thumbnails aggressively: a first batch immediately on entry (so the initial
+    // viewports are decoded before the user scrolls), then a window around the visible range
+    // while scrolling. The requests use the exact same data+size as the cells, so they fill
+    // the memory-cache entries the cells will read — a fast fling re-shows photos instantly
+    // instead of re-decoding, and a cell that scrolls out mid-load is not wasted (the preload
+    // already holds the decoded bitmap).
+    val preloadContext = LocalContext.current
+    val preloadLoader = remember(preloadContext) { preloadContext.imageLoader }
+    LaunchedEffect(gridState, items, gridThumbSize) {
+        // Enqueue each index exactly once (no repeated requests piling up in Coil's queue):
+        // a monotonically advancing frontier keeps the queue short so early requests finish fast.
+        var frontier = -1
+        fun enqueueUntil(end: Int) {
+            val e = end.coerceAtMost(items.size)
+            while (frontier < e) {
+                frontier++
+                val photo = items.getOrNull(frontier) ?: break
+                preloadLoader.enqueue(
+                    ImageRequest.Builder(preloadContext)
+                        .data(photo.uri)
+                        .size(gridThumbSize)
+                        .build()
+                )
+            }
+        }
+        // Batch 1: the first ~3 viewports (≈ 40 cells) immediately on entry.
+        enqueueUntil(40)
+        // Then advance the frontier as the user scrolls: always ~1.5 viewports ahead and keep
+        // ~1 viewport behind for upward scrolls.
+        snapshotFlow {
+            val info = gridState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            first to last
+        }.collect { (first, _) ->
+            enqueueUntil(first + 54)
+        }
+    }
     PhotoSharedTransitionLayout {
         Box(Modifier.fillMaxSize()) {
             AnimatedContent(
@@ -399,7 +451,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                                 )
                                             }
                                     ) {
-                                        SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize())
+                                        SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize)
                                         if (checked) {
                                             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
                                             Icon(
@@ -1131,11 +1183,45 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     val photos = memory?.photos ?: emptyList()
     var previewIndex by remember { mutableIntStateOf(-1) }
     val previewOpen = previewIndex in photos.indices
+    // Cell-sized decode target for the 3-column memory grid (same trick as RecycleBin).
+    val gridCellPx = with(LocalDensity.current) {
+        (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
+    }
+    val gridThumbSize = remember(gridCellPx) { CoilSize(gridCellPx, gridCellPx) }
     val scope = rememberCoroutineScope()
     // System back (including the edge-swipe gesture) returns to the home screen. While the
     // preview is open, SharedPhotoPreview's own BackHandler (composed later) closes it first.
     BackHandler(onBack = onBack)
     val gridState = rememberLazyGridState()
+    // Preload memory-grid thumbnails aggressively (first batch on entry, then a window around
+    // the visible range) — same trick as RecycleBin, so fast flings rarely show placeholders.
+    val preloadContext = LocalContext.current
+    val preloadLoader = remember(preloadContext) { preloadContext.imageLoader }
+    LaunchedEffect(gridState, photos, gridThumbSize) {
+        // Enqueue each index exactly once (monotonic frontier keeps Coil's queue short).
+        var frontier = -1
+        fun enqueueUntil(end: Int) {
+            val e = end.coerceAtMost(photos.size)
+            while (frontier < e) {
+                frontier++
+                val photo = photos.getOrNull(frontier) ?: break
+                preloadLoader.enqueue(
+                    ImageRequest.Builder(preloadContext)
+                        .data(photo.uri)
+                        .size(gridThumbSize)
+                        .build()
+                )
+            }
+        }
+        enqueueUntil(40)
+        snapshotFlow {
+            val info = gridState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+            first
+        }.collect { first ->
+            enqueueUntil(first + 54)
+        }
+    }
     PhotoSharedTransitionLayout {
         Box(Modifier.fillMaxSize().background(dc.pageBg)) {
             AnimatedContent(
@@ -1180,7 +1266,7 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                             .background(dc.white)
                                             .clickable { previewIndex = index }
                                     ) {
-                                        SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize())
+                                        SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize)
                                     }
                                 }
                             }
