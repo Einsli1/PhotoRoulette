@@ -51,6 +51,7 @@ import coil.compose.AsyncImage
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
+import coil.size.Size as CoilSize
 import com.einsli.photoroulette.data.PhotoEntity
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -69,15 +70,14 @@ fun formatDuration(ms: Long): String {
 /**
  * AsyncImage that decodes a representative video frame (1s in) instead of the first frame
  * (which is often black). For images it behaves exactly like a plain AsyncImage.
+ *
+ * [thumbSize] pins the request to the same key as the review card's SharedGridImage, so the
+ * behind-card / flying-card copies hit the already-loaded cache entry instead of re-decoding.
  */
 @Composable
-fun VideoAwareImage(photo: PhotoEntity, modifier: Modifier = Modifier, contentScale: ContentScale = ContentScale.Crop) {
+fun VideoAwareImage(photo: PhotoEntity, modifier: Modifier = Modifier, contentScale: ContentScale = ContentScale.Crop, thumbSize: CoilSize? = null) {
     val context = LocalContext.current
-    val request = remember(photo.uri) {
-        ImageRequest.Builder(context).data(photo.uri).apply {
-            if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
-        }.build()
-    }
+    val request = remember(photo.uri, thumbSize) { photoThumbRequest(context, photo, thumbSize) }
     AsyncImage(model = request, contentDescription = photo.displayName, modifier = modifier, contentScale = contentScale)
 }
 

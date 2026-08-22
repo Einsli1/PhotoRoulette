@@ -632,25 +632,28 @@ private fun formatTaken(taken: Long): String =
     var flyingX by remember { mutableFloatStateOf(0f) }
     var flyingY by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
-    // Undo slide-in: the card re-enters from the side it was thrown toward (kept → from the
-    // right, deleted → from the left). Forward advances don't slide — the next card is already
-    // revealed behind.
-    val slideInX = remember { Animatable(0f) }
+    // Undo slide-in: when returning to the previous card it slides back in from the side it was
+    // swiped away to (kept → from the right, deleted → from the left), covering the card that
+    // was shown after it — that card stays visible underneath the whole time. The Animatable is
+    // re-created per photo and starts at the off-screen position directly, so the returning card
+    // never renders centered and then jumps off-screen (that snap looked like a flash / "two
+    // cards").
     var prevPosition by remember { mutableIntStateOf(session.position) }
-    LaunchedEffect(photo.mediaId) {
-        val isUndo = session.position < prevPosition
-        prevPosition = session.position
-        if (isUndo) {
-            val from = when (session.lastActionDir) {
+    val undoFrom = remember(photo.mediaId) {
+        // lastActionDir is NEGATED by the undo (the ViewModel mirrors the direction), so a keep
+        // (original dir=1, swiped right) arrives as -1 here → return from the right.
+        if (session.position < prevPosition) {
+            when (session.lastActionDir) {
                 1 -> -flyOutDistance
                 -1 -> flyOutDistance
                 else -> 0f
             }
-            slideInX.snapTo(from)
-            slideInX.animateTo(0f, tween(260, easing = FastOutSlowInEasing))
-        } else {
-            slideInX.snapTo(0f)
-        }
+        } else 0f
+    }
+    val slideInX = remember(photo.mediaId) { Animatable(undoFrom) }
+    LaunchedEffect(photo.mediaId) {
+        prevPosition = session.position
+        if (slideInX.value != 0f) slideInX.animateTo(0f, tween(260, easing = FastOutSlowInEasing))
     }
     Column(
         Modifier
@@ -666,12 +669,15 @@ private fun formatTaken(taken: Long): String =
     ) {
         Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
             // Next card behind — revealed as the current card is dragged away, so the next photo
-            // shows DURING the swipe instead of only after the current one is fully gone.
+            // shows DURING the swipe instead of only after the current one is fully gone. Same
+            // request key as the current card's SharedGridImage (cardThumbSize), so when it
+            // becomes current it is an instant cache hit instead of a fresh decode (which flashed).
             if (next != null) {
                 VideoAwareImage(
                     next,
                     Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).background(dc.pageBg),
-                    contentScale = ContentScale.Fit
+                    contentScale = ContentScale.Fit,
+                    thumbSize = cardThumbSize
                 )
             }
             // Current card on top, draggable. Its image is the shared element: it flies to the
@@ -780,7 +786,8 @@ private fun formatTaken(taken: Long): String =
                         translationY = flyingY
                         rotationZ = (flyingX / 35f).coerceIn(-25f, 25f)
                     }.background(dc.pageBg),
-                    contentScale = ContentScale.Fit
+                    contentScale = ContentScale.Fit,
+                    thumbSize = cardThumbSize
                 )
             }
             Text(
