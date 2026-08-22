@@ -1,24 +1,20 @@
 package com.einsli.photoroulette.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.core.view.WindowCompat
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.calculatePan
-import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,10 +25,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -42,16 +35,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
@@ -68,14 +56,11 @@ import coil.compose.AsyncImage
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import com.einsli.photoroulette.AppUiState
@@ -86,32 +71,16 @@ import com.einsli.photoroulette.data.AppSettings
 import com.einsli.photoroulette.data.PhotoEntity
 import com.einsli.photoroulette.data.PhotoState
 
-/** Pages that use the zoom in / zoom out transition and hide the bottom navigation bar. */
-private val zoomPages = setOf(2, 3, 5)
+/** Pages that hide the bottom navigation bar (immersive): Review (2), RecycleBin (3) and
+ *  MemoryViewer (5) are standalone pages entered via a dedicated button. */
+private val immersivePages = setOf(2, 3, 5)
 
 @Composable fun PhotoRouletteApp(viewModel: PhotoViewModel, onAction: (Long, PhotoState, Int, Long) -> Boolean, onCommitDeletes: () -> Unit, onRestoreFromTrash: (List<Long>) -> Unit) {
     val state by viewModel.ui.collectAsStateWithLifecycle()
-    // Collected at the app level so the value is already loaded when the RecycleBin opens. The
-    // zoom overlay would otherwise start from the empty initial list and flash mid-zoom (empty
-    // state → grid, and the 全选 button's text/size changes as the data arrives).
+    // Collected at the app level so the value is already loaded when the RecycleBin opens.
     val trashItems by viewModel.trashItems.collectAsStateWithLifecycle(emptyList())
     var page by rememberSaveable { mutableIntStateOf(0) }
-    // [basePage] is the page composed UNDERNEATH. During a zoom transition the zoom page is
-    // layered on top of it (entering: zooming in; leaving: zooming out), so the destination
-    // page is already composed behind the outgoing one while it shrinks away — the old page
-    // never "flashes in from nothing" at the end of the exit animation.
-    var basePage by rememberSaveable { mutableIntStateOf(0) }
-    val overlayPage = remember { mutableStateOf<Int?>(null) }
-    // Plain states (not Animatable): initial values are set synchronously in navigate(), so the
-    // overlay's very first frame already has the correct scale/alpha — no full-size flash.
-    var overlayScale by remember { mutableFloatStateOf(1f) }
-    var overlayAlpha by remember { mutableFloatStateOf(1f) }
-    val scope = rememberCoroutineScope()
-    var overlayJob by remember { mutableStateOf<Job?>(null) }
-    // True while a zoom page is zooming IN: nothing is composed behind it then.
-    var overlayEntering by remember { mutableStateOf(false) }
-    // Hoisted so the Settings scroll position survives Settings being disposed while the
-    // RecycleBin (a zoom page) is open on top of it.
+    // Hoisted so the Settings scroll position survives navigating away and back.
     val settingsScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
     var showPicker by remember { mutableStateOf(false) }
     val darkMode = state.settings.darkMode
@@ -131,132 +100,47 @@ private val zoomPages = setOf(2, 3, 5)
         }
     }
     fun navigate(newPage: Int) {
-        val old = page
-        if (old == newPage) return
-        val entering = newPage in zoomPages
-        val exiting = old in zoomPages
-        if (!entering && !exiting) {
-            // Plain switch (bottom navigation): no zoom.
-            page = newPage
-            basePage = newPage
-            return
-        }
-        // The zoom page always animates ON TOP. While it is ENTERING, nothing is composed behind
-        // it (just the plain background), so the previous page is never visible through or around
-        // it; while it is EXITING, the destination page is composed behind it and revealed as it
-        // shrinks away.
-        overlayJob?.cancel()
-        overlayEntering = entering
-        overlayPage.value = if (entering) newPage else old
-        basePage = newPage
-        page = newPage
-        // Set the initial transform synchronously (plain state writes) so the overlay's first
-        // frame is already at the correct scale/alpha — the overlay never renders full-size.
-        if (entering) {
-            overlayScale = 0.6f
-            overlayAlpha = 1f
-        } else {
-            overlayScale = 1f
-            overlayAlpha = 1f
-        }
-        overlayJob = scope.launch {
-            if (entering) {
-                // No alpha on entrance: the page stays opaque while zooming in — translucency
-                // made the previous page's content show through and made light text look dark
-                // (black-ish) over the dark background during the animation.
-                animate(0.6f, 1f, animationSpec = tween(400, easing = FastOutSlowInEasing)) { value, _ -> overlayScale = value }
-            } else {
-                coroutineScope {
-                    launch { animate(1f, 0.6f, animationSpec = tween(300, easing = FastOutSlowInEasing)) { value, _ -> overlayScale = value } }
-                    launch { animate(1f, 0f, animationSpec = tween(300)) { value, _ -> overlayAlpha = value } }
-                }
-            }
-            overlayPage.value = null
-            overlayEntering = false
-            basePage = newPage
-            overlayJob = null
-        }
+        if (page != newPage) page = newPage
     }
     PhotoRouletteTheme(dark = isDark, dynamicColor = useDynamic) {
         val dc = designColors()
-        Box(Modifier.fillMaxSize()) {
-            Scaffold(
-                containerColor = dc.pageBg,
-                bottomBar = {
-                    // Zoom pages are immersive: no bottom navigation.
-                    if (page !in zoomPages) {
-                        NavigationBar(containerColor = dc.navBar, tonalElevation = 0.dp) {
-                            val itemColors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = dc.accentText,
-                                selectedTextColor = dc.ink,
-                                indicatorColor = dc.card,
-                                unselectedIconColor = dc.labelGray,
-                                unselectedTextColor = dc.labelGray,
-                            )
-                            NavigationBarItem(selected = page == 0, onClick = { navigate(0) }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }, colors = itemColors)
-                            NavigationBarItem(selected = page == 4, onClick = { navigate(4) }, icon = { Icon(Icons.Default.Info, null) }, label = { Text("统计") }, colors = itemColors)
-                            NavigationBarItem(selected = page == 1, onClick = { navigate(1) }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }, colors = itemColors)
-                        }
-                    }
-                }
-            ) { padding ->
-                // The staying page sits behind the animated overlay, inside the Scaffold content.
-                // Zoom pages are full-bleed (they inset themselves with systemBarsPadding), so the
-                // overlay and the base render identically and the swap at the end of the entrance
-                // animation does not jump. While a zoom page is zooming IN, nothing is composed
-                // here — the previous page must not shift or show through behind the entrance.
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .then(if (basePage in zoomPages) Modifier else Modifier.padding(padding))
-                ) {
-                    if (!overlayEntering) {
-                        PageContent(
-                            page = basePage,
-                            state = state,
-                            viewModel = viewModel,
-                            settingsScroll = settingsScroll,
-                            trashItems = trashItems,
-                            onAction = onAction,
-                            onCommitDeletes = onCommitDeletes,
-                            onRestoreFromTrash = onRestoreFromTrash,
-                            onNavigate = ::navigate,
-                            onScan = { showPicker = true }
+        Scaffold(
+            containerColor = dc.pageBg,
+            bottomBar = {
+                // Review (2) and MemoryViewer (5) are immersive: no bottom navigation.
+                if (page !in immersivePages) {
+                    NavigationBar(containerColor = dc.navBar, tonalElevation = 0.dp) {
+                        val itemColors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = dc.accentText,
+                            selectedTextColor = dc.ink,
+                            indicatorColor = dc.card,
+                            unselectedIconColor = dc.labelGray,
+                            unselectedTextColor = dc.labelGray,
                         )
+                        NavigationBarItem(selected = page == 0, onClick = { navigate(0) }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("首页") }, colors = itemColors)
+                        NavigationBarItem(selected = page == 4, onClick = { navigate(4) }, icon = { Icon(Icons.Default.Info, null) }, label = { Text("统计") }, colors = itemColors)
+                        NavigationBarItem(selected = page == 1, onClick = { navigate(1) }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("设置") }, colors = itemColors)
                     }
                 }
             }
-            // The zoom page animating in/out on top — covers the whole screen (nav bar included)
-            // so the bottom bar never pops in while the outgoing page is still visible.
-            val overlay = overlayPage.value
-            if (overlay != null) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            scaleX = overlayScale
-                            scaleY = overlayScale
-                            alpha = overlayAlpha
-                        }
-                ) {
-                    // The overlay sits OUTSIDE the Scaffold, so it is outside the Surface that
-                    // provides a themed LocalContentColor. Without this, Text/Icon (which default
-                    // to LocalContentColor = Color.Black) render BLACK in dark mode.
-                    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
-                        PageContent(
-                            page = overlay,
-                            state = state,
-                            viewModel = viewModel,
-                            settingsScroll = settingsScroll,
-                            trashItems = trashItems,
-                            onAction = onAction,
-                            onCommitDeletes = onCommitDeletes,
-                            onRestoreFromTrash = onRestoreFromTrash,
-                            onNavigate = ::navigate,
-                            onScan = { showPicker = true }
-                        )
-                    }
-                }
+        ) { padding ->
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .then(if (page in immersivePages) Modifier else Modifier.padding(padding))
+            ) {
+                PageContent(
+                    page = page,
+                    state = state,
+                    viewModel = viewModel,
+                    settingsScroll = settingsScroll,
+                    trashItems = trashItems,
+                    onAction = onAction,
+                    onCommitDeletes = onCommitDeletes,
+                    onRestoreFromTrash = onRestoreFromTrash,
+                    onNavigate = ::navigate,
+                    onScan = { showPicker = true }
+                )
             }
         }
     }
@@ -266,7 +150,7 @@ private val zoomPages = setOf(2, 3, 5)
     }
 }
 
-/** One app page. Used both for the staying page (behind) and the zooming overlay page (on top). */
+/** One app page. */
 @Composable
 private fun PageContent(
     page: Int,
@@ -317,316 +201,171 @@ private fun PageContent(
     }, dismissButton = { TextButton(onClick = onClose) { Text("取消") } })
 }
 
+/**
+ * If the photo being returned to is outside the grid's current viewport, scroll the grid to it
+ * BEFORE the shared-element return transition starts. Two things depend on this ordering:
+ * 1. The destination cell must be composed on the first frame of the transition, otherwise the
+ *    photo stays full-screen and only snaps into the cell afterwards.
+ * 2. The scroll must not happen mid-animation, otherwise the destination moves under the flying
+ *    photo and the grid jumps to put the cell at the top.
+ *
+ * [LazyGridState.requestScrollToItem] is a synchronous position update (no remeasure), so it is
+ * safe to call while the grid is not composed behind the preview. The scroll is minimal: a cell
+ * above the viewport is revealed at the top edge, a cell below at the bottom edge.
+ */
+private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
+    val visible = state.layoutInfo.visibleItemsInfo
+    val first = visible.firstOrNull()?.index
+    val last = visible.lastOrNull()?.index
+    if (first == null || last == null || index < first || index > last) {
+        val scrollOffset = if (first != null && last != null && index > last) {
+            val cellHeight = visible.first().size.height
+            (state.layoutInfo.viewportSize.height - cellHeight).coerceAtLeast(0)
+        } else {
+            0
+        }
+        state.requestScrollToItem(index, scrollOffset)
+    }
+}
+
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable private fun RecycleBin(items: List<PhotoEntity>, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var selected by remember { mutableStateOf(setOf<Long>()) }
     var previewIndex by remember { mutableIntStateOf(-1) }
-    // Window bounds of each grid cell, recorded at layout — the preview zoom starts from the
-    // tapped photo's actual position instead of the screen center.
-    val cellBounds = remember { mutableStateOf<Map<Int, Rect>>(emptyMap()) }
     val previewOpen = previewIndex in items.indices
-    // Page-level back returns to Settings. Composed BEFORE the preview handler below so the
-    // preview (composed later) wins while it is open.
+    // Page-level back returns to Settings. While the preview is open, SharedPhotoPreview's own
+    // BackHandler (composed later) wins and closes the preview first.
     BackHandler(onBack = onBack)
-    BackHandler(enabled = previewOpen) { previewIndex = -1 }
-    // The preview is a full-screen overlay INSIDE RecycleBin's own layout, not a separate
-    // Dialog window. A Dialog's height is measured as WRAP_CONTENT, which on some devices
-    // reports a taller-than-visible window and pushes the bottom buttons off-screen.
-    Box(Modifier.fillMaxSize()) {
-    Column(Modifier.fillMaxSize().systemBarsPadding().padding(12.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("回收站", style = MaterialTheme.typography.headlineMedium)
-            Button(onBack) { Text("返回") }
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val allIds = items.map { it.mediaId }.toSet()
-            Button(onClick = { selected = if (selected.size != allIds.size) allIds else emptySet() }) { Text(if (selected.size != allIds.size) "全选" else "取消全选") }
-            Button(enabled = selected.isNotEmpty(), onClick = {
-                val ids = selected.toList()
-                selected = emptySet()
-                onRestore(ids)
-            }) { Text("移出回收站") }
-            Button(enabled = selected.isNotEmpty(), onClick = {
-                val ids = selected.toList()
-                selected = emptySet()
-                scope.launch { viewModel.deleteFromTrash(ids) }
-            }) { Text("批量删除") }
-        }
-        Spacer(Modifier.height(4.dp))
-        Text("长按选中，点击预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(8.dp))
-        if (items.isEmpty()) {
-            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("回收站为空") }
-        } else {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(3),
-                modifier = Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                itemsIndexed(items) { index, photo ->
-                    val checked = selected.contains(photo.mediaId)
-                    // Live copy of `checked`: pointerInput does NOT restart when selection changes,
-                    // so the long-press handler must read the latest value through a live state.
-                    val liveChecked by rememberUpdatedState(checked)
-                    Box(
-                        Modifier
-                            .aspectRatio(1f)
-                            .clip(RoundedCornerShape(8.dp))
-                            .onGloballyPositioned { coords ->
-                                val r = coords.boundsInWindow()
-                                if (r.width > 0f) cellBounds.value = cellBounds.value + (index to r)
+    val gridState = rememberLazyGridState()
+    PhotoSharedTransitionLayout {
+        Box(Modifier.fillMaxSize()) {
+            AnimatedContent(
+                targetState = if (previewOpen) previewIndex else null,
+                transitionSpec = {
+                    fadeIn(tween(PhotoTransitionMillis)) togetherWith fadeOut(tween(PhotoTransitionMillis))
+                },
+                label = "trashPreview",
+            ) { target ->
+                if (target == null) {
+                    // ── Grid branch ──
+                    val radius = photoBranchRadius(gridCornerRadius = 8.dp, gridSide = true)
+                    Column(Modifier.fillMaxSize().systemBarsPadding().padding(12.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("回收站", style = MaterialTheme.typography.headlineMedium)
+                            Button(onBack) { Text("返回") }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            val allIds = items.map { it.mediaId }.toSet()
+                            Button(onClick = { selected = if (selected.size != allIds.size) allIds else emptySet() }) { Text(if (selected.size != allIds.size) "全选" else "取消全选") }
+                            Button(enabled = selected.isNotEmpty(), onClick = {
+                                val ids = selected.toList()
+                                selected = emptySet()
+                                onRestore(ids)
+                            }) { Text("移出回收站") }
+                            Button(enabled = selected.isNotEmpty(), onClick = {
+                                val ids = selected.toList()
+                                selected = emptySet()
+                                scope.launch { viewModel.deleteFromTrash(ids) }
+                            }) { Text("批量删除") }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text("长按选中，点击预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(8.dp))
+                        if (items.isEmpty()) {
+                            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("回收站为空") }
+                        } else {
+                            LazyVerticalGrid(
+                                state = gridState,
+                                columns = GridCells.Fixed(3),
+                                modifier = Modifier.fillMaxSize(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                itemsIndexed(items) { index, photo ->
+                                    val checked = selected.contains(photo.mediaId)
+                                    // Live copy of `checked`: pointerInput does NOT restart when
+                                    // selection changes, so the long-press handler must read the
+                                    // latest value through a live state.
+                                    val liveChecked by rememberUpdatedState(checked)
+                                    Box(
+                                        Modifier
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                            .pointerInput(photo.mediaId) {
+                                                detectTapGestures(
+                                                    onTap = { previewIndex = index },
+                                                    onLongPress = { selected = if (liveChecked) selected - photo.mediaId else selected + photo.mediaId }
+                                                )
+                                            }
+                                    ) {
+                                        SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize())
+                                        if (checked) {
+                                            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
+                                            Icon(
+                                                Icons.Default.Check,
+                                                contentDescription = "已选中",
+                                                tint = MaterialTheme.colorScheme.onPrimary,
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(6.dp)
+                                                    .size(24.dp)
+                                                    .clip(CircleShape)
+                                                    .background(MaterialTheme.colorScheme.primary)
+                                                    .padding(3.dp)
+                                            )
+                                        }
+                                    }
+                                }
                             }
-                            .pointerInput(photo.mediaId) {
-                                detectTapGestures(
-                                    onTap = { previewIndex = index },
-                                    onLongPress = { selected = if (liveChecked) selected - photo.mediaId else selected + photo.mediaId }
-                                )
-                            }
-                    ) {
-                        AsyncImage(photo.uri, photo.displayName, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                        if (checked) {
-                            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
-                            Icon(
-                                Icons.Default.Check,
-                                contentDescription = "已选中",
-                                tint = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(6.dp)
-                                    .size(24.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primary)
-                                    .padding(3.dp)
-                            )
                         }
                     }
-                }
-            }
-        }
-    }
-        if (previewOpen) {
-            TrashPreview(
-                photos = items,
-                initialIndex = previewIndex,
-                sourceBounds = cellBounds.value[previewIndex],
-                onClose = { previewIndex = -1 },
-                onRestore = { ids ->
-                    previewIndex = -1
-                    onRestore(ids)
-                },
-                onDelete = { ids ->
-                    previewIndex = -1
-                    scope.launch { viewModel.deleteFromTrash(ids) }
-                }
-            )
-        }
-    }
-}
-
-/** Full-screen preview zoom: the content scales up from the tapped photo's [sourceBounds]
- *  (window coordinates) instead of the screen center, and shrinks back to it when [close] is
- *  invoked (then [onClosed] runs). */
-@Composable
-private fun ZoomPreview(
-    sourceBounds: Rect?,
-    modifier: Modifier = Modifier,
-    onClosed: () -> Unit,
-    content: @Composable (close: () -> Unit, chromeAlpha: Float) -> Unit,
-) {
-    val previewBounds = remember { mutableStateOf<Rect?>(null) }
-    var scale by remember { mutableFloatStateOf(1f) }
-    var fade by remember { mutableFloatStateOf(1f) }
-    var chromeAlpha by remember { mutableFloatStateOf(1f) }
-    var bgAlpha by remember { mutableFloatStateOf(1f) }
-    var origin by remember { mutableStateOf(TransformOrigin.Center) }
-    var started by remember { mutableStateOf(false) }
-    var closing by remember { mutableStateOf(false) }
-    var s0 by remember { mutableFloatStateOf(1f) }
-    val scope = rememberCoroutineScope()
-    var openJob by remember { mutableStateOf<Job?>(null) }
-
-    // Start the reveal once the preview's own bounds are known (first layout). Keyed on Unit so
-    // later bounds updates (onGloballyPositioned can fire more than once) can never restart the
-    // effect and cancel the running animation — that left the preview stuck at the tiny scale.
-    LaunchedEffect(Unit) {
-        val pb = snapshotFlow { previewBounds.value }
-            .firstOrNull { it != null && it.width > 0f && it.height > 0f } ?: return@LaunchedEffect
-        val sb = sourceBounds
-        if (sb != null && sb.width > 0f) {
-            s0 = (sb.width / pb.width).coerceIn(0.05f, 1f)
-            origin = TransformOrigin(
-                ((sb.center.x - pb.left) / pb.width).coerceIn(0f, 1f),
-                ((sb.center.y - pb.top) / pb.height).coerceIn(0f, 1f)
-            )
-        } else {
-            // Fallback (no recorded cell bounds): zoom from the center.
-            s0 = 0.6f
-            origin = TransformOrigin.Center
-        }
-        started = true
-        scale = s0
-        fade = 1f
-        openJob = scope.launch {
-            animate(s0, 1f, animationSpec = tween(320, easing = FastOutSlowInEasing)) { v, _ -> scale = v }
-        }
-    }
-
-    val close: () -> Unit = {
-        if (!closing) {
-            closing = true
-            // Cancel the entrance animation so it can never fight the exit for the scale state.
-            openJob?.cancel()
-            scope.launch {
-                coroutineScope {
-                    // Chrome (title/buttons) fades out immediately — it does NOT shrink with the
-                    // photo, it just disappears over the shrinking preview.
-                    launch { animate(chromeAlpha, 0f, animationSpec = tween(90)) { v, _ -> chromeAlpha = v } }
-                    // The black background fades out too — it does NOT shrink either.
-                    launch { animate(bgAlpha, 0f, animationSpec = tween(90)) { v, _ -> bgAlpha = v } }
-                    // Shrink the photo back to the tapped cell — the grid behind is revealed the
-                    // whole time, not only at the end.
-                    launch { animate(scale, s0, animationSpec = tween(200, easing = FastOutSlowInEasing)) { v, _ -> scale = v } }
-                }
-                // Quick fade of the now tiny preview so its removal is seamless.
-                animate(fade, 0f, animationSpec = tween(80)) { v, _ -> fade = v }
-                onClosed()
-            }
-        }
-    }
-
-    Box(modifier) {
-        // Full-screen black background: fades out on exit (does NOT shrink).
-        Box(
-            Modifier
-                .fillMaxSize()
-                .graphicsLayer { alpha = if (started) bgAlpha else 0f }
-                .background(Color.Black)
-        )
-        // Scaled layer: photo + chrome zoom together. On exit the black background and the
-        // chrome (title/buttons) have already faded out, so only the photo visibly shrinks
-        // back to the tapped cell.
-        Box(
-            Modifier
-                .fillMaxSize()
-                .onGloballyPositioned { previewBounds.value = it.boundsInWindow() }
-                .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                    transformOrigin = origin
-                    alpha = if (started) fade else 0f
-                }
-        ) {
-            content(close, chromeAlpha)
-        }
-    }
-}
-
-@Composable private fun TrashPreview(photos: List<PhotoEntity>, initialIndex: Int, sourceBounds: Rect?, onClose: () -> Unit, onRestore: (List<Long>) -> Unit, onDelete: (List<Long>) -> Unit) {
-    val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, (photos.size - 1).coerceAtLeast(0))) { photos.size }
-    val dismissThreshold = with(LocalDensity.current) { 160.dp.toPx() }
-    var dragY by remember { mutableFloatStateOf(0f) }
-    ZoomPreview(
-        sourceBounds = sourceBounds,
-        modifier = Modifier.fillMaxSize(),
-        onClosed = onClose
-    ) { close, chromeAlpha ->
-        BackHandler { close() }
-        Column(
-            Modifier
-                .fillMaxSize()
-                // Keep the top title and bottom buttons clear of the status bar and
-                // gesture/navigation bar in this edge-to-edge window.
-                .systemBarsPadding()
-                .graphicsLayer { translationY = dragY }
-                .pointerInput(Unit) {
-                    detectVerticalDragGestures(
-                        onVerticalDrag = { change, amount ->
-                            // Downward drags pull the preview down; upward ones snap back.
-                            if (amount > 0f || dragY > 0f) {
-                                dragY += amount
-                                change.consume()
+                } else {
+                    // ── Preview branch ──
+                    SharedPhotoPreview(
+                        photos = items,
+                        initialIndex = target,
+                        animatedRadius = photoBranchRadius(gridCornerRadius = 8.dp, gridSide = false),
+                        animatedVisibilityScope = this@AnimatedContent,
+                        swipeDownToClose = true,
+                        onClose = { current ->
+                            scope.launch {
+                                val idx = items.indexOfFirst { it.mediaId == current.mediaId }
+                                // Scroll the grid BEFORE closing so the returning photo's cell is
+                                // already in view (and composed) when the return transition starts.
+                                if (idx >= 0) revealGridItemIfOffscreen(gridState, idx)
+                                previewIndex = -1
                             }
                         },
-                        onDragEnd = { if (dragY > dismissThreshold) close() else dragY = 0f },
-                        onDragCancel = { dragY = 0f }
+                        bottomControls = { current ->
+                            Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Button(onClick = {
+                                    previewIndex = -1
+                                    onRestore(listOf(current.mediaId))
+                                }, Modifier.weight(1f)) { Text("移出回收站") }
+                                Button(onClick = {
+                                    previewIndex = -1
+                                    scope.launch { viewModel.deleteFromTrash(listOf(current.mediaId)) }
+                                }, Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("永久删除") }
+                            }
+                        }
                     )
                 }
-        ) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).graphicsLayer { alpha = chromeAlpha }, horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = close) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
-                Text(photos[pagerState.currentPage].displayName, color = Color.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
-                Text("${pagerState.currentPage + 1}/${photos.size}", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
-            }
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth().weight(1f)) { page ->
-                ZoomablePhoto(photos[page])
-            }
-            Row(Modifier.fillMaxWidth().padding(16.dp).graphicsLayer { alpha = chromeAlpha }, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = { onRestore(listOf(photos[pagerState.currentPage].mediaId)) }, Modifier.weight(1f)) { Text("移出回收站") }
-                Button(onClick = { onDelete(listOf(photos[pagerState.currentPage].mediaId)) }, Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("永久删除") }
             }
         }
     }
 }
 
-@Composable private fun ZoomablePhoto(photo: PhotoEntity) {
-    var scale by remember(photo.mediaId) { mutableFloatStateOf(1f) }
-    var offsetX by remember(photo.mediaId) { mutableFloatStateOf(0f) }
-    var offsetY by remember(photo.mediaId) { mutableFloatStateOf(0f) }
-    var viewportW by remember(photo.mediaId) { mutableIntStateOf(0) }
-    var viewportH by remember(photo.mediaId) { mutableIntStateOf(0) }
-    // clipToBounds: graphicsLayer scales the rendering WITHOUT clipping, so a zoomed-in image
-    // would overflow the page bounds and draw over the title/counter above. Clip keeps a 5x
-    // zoom inside the pager area.
-    Box(Modifier.fillMaxSize().clipToBounds().onSizeChanged { viewportW = it.width; viewportH = it.height }) {
-        AsyncImage(
-            photo.uri, photo.displayName,
-            Modifier.fillMaxSize().graphicsLayer {
-                scaleX = scale; scaleY = scale
-                translationX = offsetX; translationY = offsetY
-            }.pointerInput(photo.mediaId) {
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    // Single finger pans only while already zoomed; otherwise leave the events
-                    // unconsumed so the pager (horizontal) or swipe-down dismiss (vertical) handles
-                    // them. A second finger always starts a pinch-zoom that consumes everything.
-                    var consumed = scale > 1f
-                    var panX = 0f
-                    var panY = 0f
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val pressed = event.changes.count { it.pressed }
-                        if (pressed >= 2) consumed = true
-                        if (consumed) {
-                            val zoom = event.calculateZoom()
-                            val pan = event.calculatePan()
-                            scale = (scale * zoom).coerceIn(1f, 5f)
-                            panX += pan.x
-                            panY += pan.y
-                            val maxPanX = (viewportW * (scale - 1f)) / 2f
-                            val maxPanY = (viewportH * (scale - 1f)) / 2f
-                            offsetX = panX.coerceIn(-maxPanX, maxPanX)
-                            offsetY = panY.coerceIn(-maxPanY, maxPanY)
-                            event.changes.forEach { it.consume() }
-                        }
-                        if (pressed == 0) break
-                    }
-                    if (scale <= 1f) { offsetX = 0f; offsetY = 0f }
-                }
-            }
-        )
-    }
-}
-
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable private fun Review(session: ReviewSession?, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, onDone: () -> Unit, onBack: () -> Unit) {
-    // System back (including the edge-swipe gesture) returns to the home screen. The page-level
-    // zoom out is played by the parent's overlay transition, which keeps Home composed behind.
+    // System back (including the edge-swipe gesture) returns to the home screen. While the
+    // full-screen preview is open, SharedPhotoPreview's own BackHandler (composed later) wins
+    // and closes the preview first.
     BackHandler(onBack = onBack)
+    var previewOpen by remember { mutableStateOf(false) }
     // Light zoom-in when a NEW session arrives while already on this page (处理删除并继续整理).
-    // The page enter/exit zoom belongs to the parent transition, so the first session seen here —
-    // even if it arrives AFTER the parent's entrance has finished — must not zoom again, otherwise
-    // the page would shrink back after reaching full size.
     val animScale = remember { Animatable(1f) }
     var seenSessionId by remember { mutableStateOf<Long?>(null) }
     LaunchedEffect(session?.sessionId) {
@@ -638,36 +377,66 @@ private fun ZoomPreview(
         seenSessionId = id
     }
     val dc = designColors()
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(dc.pageBg)
-            // Zoom pages are composed full-bleed (behind/overlay render identically); inset
-            // ourselves so the header stays clear of the status bar.
-            .systemBarsPadding()
-            .padding(horizontal = 20.dp)
-            .graphicsLayer {
-                scaleX = animScale.value
-                scaleY = animScale.value
+    val current = session?.current
+    PhotoSharedTransitionLayout {
+        Box(Modifier.fillMaxSize()) {
+            AnimatedContent(
+                targetState = if (previewOpen && current != null) 0 else null,
+                transitionSpec = {
+                    fadeIn(tween(PhotoTransitionMillis)) togetherWith fadeOut(tween(PhotoTransitionMillis))
+                },
+                label = "reviewPreview",
+            ) { target ->
+                if (target == null) {
+                    // ── Card branch ──
+                    val radius = photoBranchRadius(gridCornerRadius = 20.dp, gridSide = true)
+                    Column(
+                        Modifier
+                            .fillMaxSize()
+                            .background(dc.pageBg)
+                            // Review is composed full-bleed; inset ourselves so the header stays
+                            // clear of the status bar.
+                            .systemBarsPadding()
+                            .padding(horizontal = 20.dp)
+                            .graphicsLayer {
+                                scaleX = animScale.value
+                                scaleY = animScale.value
+                            }
+                    ) {
+                        Spacer(Modifier.height(10.dp))
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+                            Text("本次整理", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = dc.ink, modifier = Modifier.weight(1f))
+                            Text("剩余 ${session?.remaining ?: 0} / ${session?.queue?.size ?: 0}", fontSize = 13.sp, color = dc.slate)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        val s = session
+                        when {
+                            // No loading spinner: render nothing until the session is published.
+                            s == null -> Box(Modifier.fillMaxWidth().weight(1f))
+                            s.current == null -> Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                                Text("本次完成！", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+                                Spacer(Modifier.height(16.dp))
+                                Button(onClick = onDone, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White)) { Text("处理删除并继续整理") }
+                            }
+                            else -> Box(Modifier.fillMaxWidth().weight(1f)) {
+                                SwipePhoto(s, onAction, onUndo, animatedRadius = radius, animatedVisibilityScope = this@AnimatedContent, onTapPhoto = { previewOpen = true })
+                            }
+                        }
+                    }
+                } else {
+                    // ── Preview branch ──
+                    if (current != null) {
+                        SharedPhotoPreview(
+                            photos = listOf(current),
+                            initialIndex = 0,
+                            animatedRadius = photoBranchRadius(gridCornerRadius = 20.dp, gridSide = false),
+                            animatedVisibilityScope = this@AnimatedContent,
+                            onClose = { previewOpen = false },
+                        )
+                    }
+                }
             }
-    ) {
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
-            Text("本次整理", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = dc.ink, modifier = Modifier.weight(1f))
-            Text("剩余 ${session?.remaining ?: 0} / ${session?.queue?.size ?: 0}", fontSize = 13.sp, color = dc.slate)
-        }
-        Spacer(Modifier.height(12.dp))
-        val s = session
-        when {
-            // No loading spinner: render nothing until the session is published.
-            s == null -> Box(Modifier.fillMaxWidth().weight(1f))
-            s.current == null -> Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                Text("本次完成！", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = dc.ink)
-                Spacer(Modifier.height(16.dp))
-                Button(onClick = onDone, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White)) { Text("处理删除并继续整理") }
-            }
-            else -> Box(Modifier.fillMaxWidth().weight(1f)) { SwipePhoto(s, onAction, onUndo) }
         }
     }
 }
@@ -675,7 +444,8 @@ private fun ZoomPreview(
 private fun formatTaken(taken: Long): String =
     if (taken <= 0L) "" else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(taken))
 
-@Composable private fun SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit) {
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable private fun SharedTransitionScope.SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, animatedRadius: Dp, animatedVisibilityScope: AnimatedVisibilityScope, onTapPhoto: (PhotoEntity) -> Unit) {
     val dc = designColors()
     val photo = session.current!!
     val next = session.queue.getOrNull(session.position + 1)
@@ -736,61 +506,79 @@ private fun formatTaken(taken: Long): String =
                     contentScale = ContentScale.Fit
                 )
             }
-            // Current card on top, draggable.
-            AsyncImage(
-                photo.uri, photo.displayName,
-                Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).graphicsLayer {
-                    translationX = dragX + slideInX.value; translationY = dragY
-                    rotationZ = (dragX / 35f).coerceIn(-25f, 25f)
-                }.background(dc.pageBg).pointerInput(photo.mediaId) {
-                    detectDragGestures(
-                        onDrag = { change, amount ->
-                            change.consume()
-                            dragX += amount.x; dragY += amount.y
-                        },
-                        onDragEnd = {
-                            val dir: Int
-                            val state: PhotoState
-                            when {
-                                dragX < -swipeThreshold -> { dir = -1; state = PhotoState.DELETE_PENDING }
-                                dragX > swipeThreshold -> { dir = 1; state = PhotoState.KEEP }
-                                else -> { dir = 0; state = PhotoState.KEEP }
-                            }
-                            val startX = dragX
-                            val startY = dragY
-                            if (dir != 0) {
-                                // Reset the top card's offset synchronously so the next card starts
-                                // centered once the session advances; the swiped card keeps flying
-                                // out via [flyingPhoto]/[flyingX]/[flyingY].
-                                dragX = 0f
-                                dragY = 0f
-                                // The card asks the ViewModel to advance ITSELF by its own mediaId
-                                // plus the swipe direction. The ViewModel only advances if this photo
-                                // is still current, so a ghost drag can never advance the next card.
-                                if (onAction(photo.mediaId, state, dir, userTouchedAt)) {
-                                    val dirX = if (startX < 0f) -1f else 1f
-                                    val endX = dirX * flyOutDistance
-                                    flyingPhoto = photo
-                                    flyingX = startX
-                                    flyingY = startY
-                                    scope.launch {
-                                        val start = System.currentTimeMillis()
-                                        while (true) {
-                                            val t = ((System.currentTimeMillis() - start).toFloat() / 180f).coerceIn(0f, 1f)
-                                            val eased = 1f - (1f - t) * (1f - t)
-                                            flyingX = startX + (endX - startX) * eased
-                                            flyingY = startY * (1f - eased)
-                                            if (t >= 1f) break
-                                            withFrameMillis { }
+            // Current card on top, draggable. Its image is the shared element: it flies to the
+            // full-screen preview (放大查看) and back.
+            Box(
+                Modifier.fillMaxSize()
+                    .clip(RoundedCornerShape(20.dp))
+                    .graphicsLayer {
+                        translationX = dragX + slideInX.value; translationY = dragY
+                        rotationZ = (dragX / 35f).coerceIn(-25f, 25f)
+                    }
+                    .background(dc.pageBg)
+                    .pointerInput(photo.mediaId) {
+                        detectDragGestures(
+                            onDrag = { change, amount ->
+                                change.consume()
+                                dragX += amount.x; dragY += amount.y
+                            },
+                            onDragEnd = {
+                                val dir: Int
+                                val state: PhotoState
+                                when {
+                                    dragX < -swipeThreshold -> { dir = -1; state = PhotoState.DELETE_PENDING }
+                                    dragX > swipeThreshold -> { dir = 1; state = PhotoState.KEEP }
+                                    else -> { dir = 0; state = PhotoState.KEEP }
+                                }
+                                val startX = dragX
+                                val startY = dragY
+                                if (dir != 0) {
+                                    // Reset the top card's offset synchronously so the next card starts
+                                    // centered once the session advances; the swiped card keeps flying
+                                    // out via [flyingPhoto]/[flyingX]/[flyingY].
+                                    dragX = 0f
+                                    dragY = 0f
+                                    // The card asks the ViewModel to advance ITSELF by its own mediaId
+                                    // plus the swipe direction. The ViewModel only advances if this photo
+                                    // is still current, so a ghost drag can never advance the next card.
+                                    if (onAction(photo.mediaId, state, dir, userTouchedAt)) {
+                                        val dirX = if (startX < 0f) -1f else 1f
+                                        val endX = dirX * flyOutDistance
+                                        flyingPhoto = photo
+                                        flyingX = startX
+                                        flyingY = startY
+                                        scope.launch {
+                                            val start = System.currentTimeMillis()
+                                            while (true) {
+                                                val t = ((System.currentTimeMillis() - start).toFloat() / 180f).coerceIn(0f, 1f)
+                                                val eased = 1f - (1f - t) * (1f - t)
+                                                flyingX = startX + (endX - startX) * eased
+                                                flyingY = startY * (1f - eased)
+                                                if (t >= 1f) break
+                                                withFrameMillis { }
+                                            }
+                                            flyingPhoto = null
                                         }
-                                        flyingPhoto = null
+                                    } else {
+                                        // ViewModel refused: restore the offset and ease back to center.
+                                        dragX = startX
+                                        dragY = startY
+                                        scope.launch {
+                                            val sx = startX; val sy = startY
+                                            val start = System.currentTimeMillis()
+                                            while (true) {
+                                                val t = ((System.currentTimeMillis() - start).toFloat() / 150f).coerceIn(0f, 1f)
+                                                val eased = 1f - (1f - t) * (1f - t)
+                                                dragX = sx * (1f - eased); dragY = sy * (1f - eased)
+                                                if (t >= 1f) break
+                                                withFrameMillis { }
+                                            }
+                                        }
                                     }
                                 } else {
-                                    // ViewModel refused: restore the offset and ease back to center.
-                                    dragX = startX
-                                    dragY = startY
+                                    // Below threshold: ease back to center.
                                     scope.launch {
-                                        val sx = startX; val sy = startY
+                                        val sx = dragX; val sy = dragY
                                         val start = System.currentTimeMillis()
                                         while (true) {
                                             val t = ((System.currentTimeMillis() - start).toFloat() / 150f).coerceIn(0f, 1f)
@@ -801,25 +589,17 @@ private fun formatTaken(taken: Long): String =
                                         }
                                     }
                                 }
-                            } else {
-                                // Below threshold: ease back to center.
-                                scope.launch {
-                                    val sx = dragX; val sy = dragY
-                                    val start = System.currentTimeMillis()
-                                    while (true) {
-                                        val t = ((System.currentTimeMillis() - start).toFloat() / 150f).coerceIn(0f, 1f)
-                                        val eased = 1f - (1f - t) * (1f - t)
-                                        dragX = sx * (1f - eased); dragY = sy * (1f - eased)
-                                        if (t >= 1f) break
-                                        withFrameMillis { }
-                                    }
-                                }
                             }
-                        }
-                    )
-                },
-                contentScale = ContentScale.Fit
-            )
+                        )
+                    }
+                    .pointerInput(photo.mediaId) {
+                        // Tap opens the full-screen 放大查看 preview; drags (swipe to keep/delete)
+                        // are unaffected — detectTapGestures cancels once the finger moves past slop.
+                        detectTapGestures(onTap = { onTapPhoto(photo) })
+                    }
+            ) {
+                SharedGridImage(photo, animatedRadius, animatedVisibilityScope, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            }
             // Flying-out card on top (rendered last = topmost), so it visibly slides off over
             // the already-revealed next card.
             val flying = flyingPhoto
@@ -1234,101 +1014,86 @@ private fun WheelNumberPicker(
 }
 
 /** Full-screen browse of "N年前的今天" photos, reached via 回忆时光机 → 去看看. */
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     val dc = designColors()
     val photos = memory?.photos ?: emptyList()
     var previewIndex by remember { mutableIntStateOf(-1) }
-    // Window bounds of each grid cell, recorded at layout — the preview zoom starts from the
-    // tapped photo's actual position instead of the screen center.
-    val cellBounds = remember { mutableStateOf<Map<Int, Rect>>(emptyMap()) }
-    // System back (including the edge-swipe gesture): close the full-screen preview first,
-    // otherwise return to the home screen.
-    BackHandler {
-        if (previewIndex in photos.indices) previewIndex = -1 else onBack()
-    }
-    Box(Modifier.fillMaxSize().background(dc.pageBg)) {
-        Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp)) {
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { Icon(Icons.Default.Close, "返回") }
-                Column(Modifier.weight(1f)) {
-                    Text("回忆时光机", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = dc.ink)
-                    if (memory != null) {
-                        Text("${memory.yearsAgo}年前的今天 · ${memory.dateText} · ${memory.count} 张照片", fontSize = 12.sp, color = dc.slate)
-                    }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            if (photos.isEmpty()) {
-                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Text("暂无回忆", color = dc.slate)
-                }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    itemsIndexed(photos) { index, photo ->
-                        Box(
-                            Modifier
-                                .aspectRatio(1f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(dc.white)
-                                .onGloballyPositioned { coords ->
-                                    val r = coords.boundsInWindow()
-                                    if (r.width > 0f) cellBounds.value = cellBounds.value + (index to r)
+    val previewOpen = previewIndex in photos.indices
+    val scope = rememberCoroutineScope()
+    // System back (including the edge-swipe gesture) returns to the home screen. While the
+    // preview is open, SharedPhotoPreview's own BackHandler (composed later) closes it first.
+    BackHandler(onBack = onBack)
+    val gridState = rememberLazyGridState()
+    PhotoSharedTransitionLayout {
+        Box(Modifier.fillMaxSize().background(dc.pageBg)) {
+            AnimatedContent(
+                targetState = if (previewOpen) previewIndex else null,
+                transitionSpec = {
+                    fadeIn(tween(PhotoTransitionMillis)) togetherWith fadeOut(tween(PhotoTransitionMillis))
+                },
+                label = "memoryPreview",
+            ) { target ->
+                if (target == null) {
+                    // ── Grid branch ──
+                    val radius = photoBranchRadius(gridCornerRadius = 12.dp, gridSide = true)
+                    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp)) {
+                        Spacer(Modifier.height(10.dp))
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = onBack) { Icon(Icons.Default.Close, "返回") }
+                            Column(Modifier.weight(1f)) {
+                                Text("回忆时光机", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+                                if (memory != null) {
+                                    Text("${memory.yearsAgo}年前的今天 · ${memory.dateText} · ${memory.count} 张照片", fontSize = 12.sp, color = dc.slate)
                                 }
-                                .clickable { previewIndex = index }
-                        ) {
-                            AsyncImage(photo.uri, photo.displayName, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        if (photos.isEmpty()) {
+                            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                                Text("暂无回忆", color = dc.slate)
+                            }
+                        } else {
+                            LazyVerticalGrid(
+                                state = gridState,
+                                columns = GridCells.Fixed(3),
+                                modifier = Modifier.fillMaxSize(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                itemsIndexed(photos) { index, photo ->
+                                    Box(
+                                        Modifier
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(dc.white)
+                                            .clickable { previewIndex = index }
+                                    ) {
+                                        SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize())
+                                    }
+                                }
+                            }
                         }
                     }
+                } else {
+                    // ── Preview branch ──
+                    SharedPhotoPreview(
+                        photos = photos,
+                        initialIndex = target,
+                        animatedRadius = photoBranchRadius(gridCornerRadius = 12.dp, gridSide = false),
+                        animatedVisibilityScope = this@AnimatedContent,
+                        onClose = { current ->
+                            scope.launch {
+                                val idx = photos.indexOfFirst { it.mediaId == current.mediaId }
+                                // Scroll the grid BEFORE closing so the returning photo's cell is
+                                // already in view (and composed) when the return transition starts.
+                                if (idx >= 0) revealGridItemIfOffscreen(gridState, idx)
+                                previewIndex = -1
+                            }
+                        },
+                    )
                 }
-            }
-        }
-        if (previewIndex in photos.indices) {
-            MemoryPreview(photos, previewIndex, sourceBounds = cellBounds.value[previewIndex], onClose = { previewIndex = -1 })
-        }
-    }
-}
-
-@Composable
-private fun MemoryPreview(photos: List<PhotoEntity>, initialIndex: Int, sourceBounds: Rect?, onClose: () -> Unit) {
-    val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, (photos.size - 1).coerceAtLeast(0))) { photos.size }
-    ZoomPreview(
-        sourceBounds = sourceBounds,
-        modifier = Modifier.fillMaxSize(),
-        onClosed = onClose
-    ) { close, chromeAlpha ->
-        BackHandler { close() }
-        Column(Modifier.fillMaxSize().systemBarsPadding()) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).graphicsLayer { alpha = chromeAlpha },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = close) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
-                Text(
-                    photos[pagerState.currentPage].displayName,
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
-                )
-                Text(
-                    "${pagerState.currentPage + 1}/${photos.size}",
-                    color = Color.White.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(end = 8.dp)
-                )
-            }
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth().weight(1f)) { page ->
-                ZoomablePhoto(photos[page])
             }
         }
     }
