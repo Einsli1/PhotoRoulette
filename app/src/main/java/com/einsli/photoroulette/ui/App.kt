@@ -54,9 +54,9 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil.compose.AsyncImage
 import coil.imageLoader
 import coil.request.ImageRequest
+import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
 import kotlin.math.roundToInt
 import androidx.compose.foundation.lazy.LazyColumn
@@ -371,6 +371,9 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                     ImageRequest.Builder(preloadContext)
                         .data(photo.uri)
                         .size(gridThumbSize)
+                        .apply {
+                            if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
+                        }
                         .build()
                 )
             }
@@ -452,6 +455,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                             }
                                     ) {
                                         SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize)
+                                        VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
                                         if (checked) {
                                             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
                                             Icon(
@@ -651,8 +655,8 @@ private fun formatTaken(taken: Long): String =
             // Next card behind — revealed as the current card is dragged away, so the next photo
             // shows DURING the swipe instead of only after the current one is fully gone.
             if (next != null) {
-                AsyncImage(
-                    next.uri, next.displayName,
+                VideoAwareImage(
+                    next,
                     Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).background(dc.pageBg),
                     contentScale = ContentScale.Fit
                 )
@@ -750,13 +754,14 @@ private fun formatTaken(taken: Long): String =
                     }
             ) {
                 SharedGridImage(photo, animatedRadius, animatedVisibilityScope, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 48.dp, textSize = 12)
             }
             // Flying-out card on top (rendered last = topmost), so it visibly slides off over
             // the already-revealed next card.
             val flying = flyingPhoto
             if (flying != null) {
-                AsyncImage(
-                    flying.uri, flying.displayName,
+                VideoAwareImage(
+                    flying,
                     Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).graphicsLayer {
                         translationX = flyingX
                         translationY = flyingY
@@ -1209,6 +1214,9 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                     ImageRequest.Builder(preloadContext)
                         .data(photo.uri)
                         .size(gridThumbSize)
+                        .apply {
+                            if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
+                        }
                         .build()
                 )
             }
@@ -1267,6 +1275,7 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                             .clickable { previewIndex = index }
                                     ) {
                                         SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize)
+                                        VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
                                     }
                                 }
                             }

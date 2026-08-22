@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
+import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
 import com.einsli.photoroulette.data.PhotoEntity
 import kotlin.math.roundToInt
@@ -141,6 +142,8 @@ fun SharedTransitionScope.SharedGridImage(
     val thumbRequest = remember(photo.uri, gridSize) {
         ImageRequest.Builder(context).data(photo.uri).apply {
             if (gridSize != null) size(gridSize)
+            // Videos decode a representative frame (1s in) instead of the often-black first frame.
+            if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
         }.build()
     }
     var thumbReady by remember(photo.uri, gridSize) { mutableStateOf(false) }
@@ -170,7 +173,9 @@ fun SharedTransitionScope.SharedGridImage(
         if (morph < 1f) {
             AsyncImage(
                 model = remember(photo.uri, previewSize) {
-                    ImageRequest.Builder(context).data(photo.uri).size(previewSize).build()
+                    ImageRequest.Builder(context).data(photo.uri).size(previewSize).apply {
+                        if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
+                    }.build()
                 },
                 contentDescription = photo.displayName,
                 modifier = Modifier.fillMaxSize().alpha(1f - morph),
@@ -244,6 +249,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
         initialPage = initialIndex.coerceIn(0, (openPhotos.size - 1).coerceAtLeast(0)),
     ) { openPhotos.size.coerceAtLeast(1) }
     val currentPhoto = openPhotos.getOrNull(pagerState.currentPage) ?: return
+    val context = LocalContext.current
     val state = rememberSharedContentState(photoSharedKey(currentPhoto.mediaId))
     // While a shared transition is running the image is controlled by the transition; disable
     // pinch/pan so the two never fight over the same photo.
@@ -359,8 +365,13 @@ fun SharedTransitionScope.SharedPhotoPreview(
                 // fades out as the photo expands to full-screen. Only composed while the open
                 // transition runs, so the resting preview does not waste a full-screen decode.
                 if (morph < 1f) {
+                    val copyRequest = remember(currentPhoto.uri) {
+                        ImageRequest.Builder(context).data(currentPhoto.uri).apply {
+                            if (currentPhoto.mimeType.startsWith("video/")) videoFrameMillis(1000)
+                        }.build()
+                    }
                     AsyncImage(
-                        currentPhoto.uri,
+                        copyRequest,
                         currentPhoto.displayName,
                         Modifier.fillMaxSize().alpha(1f - morph),
                         contentScale = sourceContentScale,
@@ -370,12 +381,22 @@ fun SharedTransitionScope.SharedPhotoPreview(
                     state = pagerState,
                     modifier = Modifier.fillMaxSize().alpha(morph),
                 ) { page ->
-                    ZoomablePhoto(
-                        photo = openPhotos[page],
-                        enabled = !transitionActive,
-                        resetTick = zoomResetTick,
-                        onResetDone = { if (closePending) onClose(currentPhoto) },
-                    )
+                    val p = openPhotos[page]
+                    if (p.mimeType.startsWith("video/")) {
+                        VideoPhoto(
+                            photo = p,
+                            active = pagerState.currentPage == page,
+                            resetTick = zoomResetTick,
+                            onResetDone = { if (closePending) onClose(currentPhoto) },
+                        )
+                    } else {
+                        ZoomablePhoto(
+                            photo = p,
+                            enabled = !transitionActive,
+                            resetTick = zoomResetTick,
+                            onResetDone = { if (closePending) onClose(currentPhoto) },
+                        )
+                    }
                 }
             }
             bottomControls?.invoke(currentPhoto)

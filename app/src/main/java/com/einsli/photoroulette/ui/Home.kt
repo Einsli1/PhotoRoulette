@@ -26,7 +26,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import com.einsli.photoroulette.AppUiState
 import com.einsli.photoroulette.BuildConfig
 import com.einsli.photoroulette.R
@@ -198,10 +197,9 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
                             .background(dc.white)
                     ) {
                         if (preview != null) {
-                            AsyncImage(
-                                model = preview.uri,
-                                contentDescription = preview.displayName,
-                                modifier = Modifier.fillMaxSize(),
+                            VideoAwareImage(
+                                preview,
+                                Modifier.fillMaxSize(),
                                 contentScale = ContentScale.Crop
                             )
                         } else {
@@ -449,10 +447,9 @@ private fun MemoryCard(state: AppUiState, onOpenMemory: () -> Unit) {
                                     .clip(RoundedCornerShape(12.dp))
                                     .background(dc.white)
                             ) {
-                                AsyncImage(
-                                    model = photo.uri,
-                                    contentDescription = photo.displayName,
-                                    modifier = Modifier.fillMaxSize(),
+                                VideoAwareImage(
+                                    photo,
+                                    Modifier.fillMaxSize(),
                                     contentScale = ContentScale.Crop
                                 )
                             }

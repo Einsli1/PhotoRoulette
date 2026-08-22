@@ -14,6 +14,7 @@ data class PhotoEntity(
     val mimeType: String,
     val album: String = "",
     val size: Long = 0,
+    val duration: Long = 0,
     val state: PhotoState = PhotoState.UNSEEN,
     val lastShownDay: String? = null,
     val processedAt: Long? = null,

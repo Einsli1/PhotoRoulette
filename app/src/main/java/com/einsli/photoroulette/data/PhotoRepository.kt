@@ -30,11 +30,19 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
     }
 
     suspend fun scanGallery(config: AppSettings): Int {
-        dao.insertAll(scanner.scan(config.includeVideos, config.includeScreenshots, config.includedAlbums))
+        val scanned = scanner.scan(config.includeVideos, config.includeScreenshots, config.includedAlbums)
+        dao.insertAll(scanned)
+        // Old video rows keep duration=0 (insertAll IGNORE): backfill from the fresh scan so
+        // videos that predate the duration column also get their duration badge.
+        scanned.filter { it.duration > 0 }.forEach { dao.backfillDuration(it.mediaId, it.duration) }
         // Drop unprocessed photos from albums that are no longer selected, so the total count
         // tracks the album selection. Processed / trashed photos are left untouched.
         if (config.includedAlbums.isNotEmpty()) {
             dao.deleteOutOfScope(config.includedAlbums.map { it.uppercase() })
+        }
+        // Drop unprocessed videos when 包含视频 is turned OFF, so the pool tracks the toggle.
+        if (!config.includeVideos) {
+            dao.deleteOutOfVideoScope()
         }
         return dao.totalNow()
     }

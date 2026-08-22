@@ -224,7 +224,15 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     // Individual setters — save immediately without rebuilding the queue. The new values take
     // effect on the next session / 开始整理 (or immediately for darkMode via theme recomposition).
     fun setDailyCount(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(dailyCount = v)) }
-    fun setIncludeVideos(v: Boolean) = viewModelScope.launch { settingsRepository.save(settings.value.copy(includeVideos = v)) }
+    // Toggling 包含视频 rescans immediately so the pool reflects the change: turning it ON pulls
+    // videos in right away (previously this only saved the flag — videos never appeared until the
+    // next album rescan), turning it OFF drops unprocessed videos from the pool.
+    fun setIncludeVideos(v: Boolean) = viewModelScope.launch {
+        val next = settings.value.copy(includeVideos = v)
+        settingsRepository.save(next)
+        repository.scanGallery(next)
+        reload()
+    }
     fun setIncludeScreenshots(v: Boolean) = viewModelScope.launch { settingsRepository.save(settings.value.copy(includeScreenshots = v)) }
     fun setReminderHour(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(reminderHour = v)) }
     fun setReminderMinute(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(reminderMinute = v)) }

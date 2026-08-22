@@ -15,6 +15,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import coil.Coil
+import coil.ImageLoader
+import coil.decode.VideoFrameDecoder
 import com.einsli.photoroulette.data.*
 import com.einsli.photoroulette.media.MediaScanner
 import com.einsli.photoroulette.ui.PhotoRouletteApp
@@ -56,6 +59,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Register the video-frame decoder on the singleton ImageLoader: coil-video 2.7.0 does
+        // not self-register via ServiceLoader, and without it video content:// URIs fail to
+        // decode (the 包含视频 pool would show blank cards instead of frames).
+        Coil.setImageLoader {
+            ImageLoader.Builder(applicationContext).components { add(VideoFrameDecoder.Factory()) }.build()
+        }
         ReminderScheduler.schedule(this, 20, 0)
         requestPermissionsIfNeeded()
         setContent {

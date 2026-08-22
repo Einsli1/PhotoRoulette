@@ -19,6 +19,18 @@ interface PhotoDao {
     @Query("DELETE FROM photos WHERE inTrash = 0 AND state IN ('UNSEEN', 'SKIP') AND album != '' AND UPPER(album) NOT IN (:albums)")
     suspend fun deleteOutOfScope(albums: List<String>)
 
+    // Same idea for the 包含视频 toggle: when videos are turned OFF, drop unprocessed videos
+    // from the pool so the total count tracks the toggle. Processed / trashed videos stay, so
+    // organizing history and the trash are never wiped by toggling.
+    @Query("DELETE FROM photos WHERE inTrash = 0 AND state IN ('UNSEEN', 'SKIP') AND mimeType LIKE 'video/%'")
+    suspend fun deleteOutOfVideoScope()
+
+    // Videos scanned before the duration column existed keep duration=0 (insertAll IGNORE
+    // never touches existing rows); backfill them from a fresh scan so old videos also show
+    // their duration pill. The duration=0 guard keeps it a no-op once filled.
+    @Query("UPDATE photos SET duration = :duration WHERE mediaId = :mediaId AND duration = 0 AND mimeType LIKE 'video/%'")
+    suspend fun backfillDuration(mediaId: Long, duration: Long)
+
     // ── candidate selection: strategy (random / oldest / largest) × date range ──
     @Query("SELECT * FROM photos WHERE state IN ('UNSEEN', 'SKIP') AND inTrash = 0 AND (:minDate IS NULL OR dateTaken >= :minDate) AND (:maxDate IS NULL OR dateTaken < :maxDate) ORDER BY RANDOM() LIMIT :limit")
     suspend fun randomCandidates(limit: Int, minDate: Long?, maxDate: Long?): List<PhotoEntity>
