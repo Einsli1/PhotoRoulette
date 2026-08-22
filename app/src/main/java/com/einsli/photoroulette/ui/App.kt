@@ -432,6 +432,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                             initialIndex = 0,
                             animatedRadius = photoBranchRadius(gridCornerRadius = 20.dp, gridSide = false),
                             animatedVisibilityScope = this@AnimatedContent,
+                            sourceContentScale = ContentScale.Fit,
                             onClose = { previewOpen = false },
                         )
                     }

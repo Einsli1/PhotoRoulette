@@ -10,6 +10,7 @@ import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -41,6 +42,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -100,11 +102,10 @@ fun PhotoSharedTransitionLayout(
  * radius is animated by the branch transition (see [photoBranchRadius]) and the photo is matched
  * to the preview by [photoSharedKey].
  *
- * The grid renders with [ContentScale.Fit] (not Crop): during a shared transition Compose renders
- * BOTH the incoming and the outgoing shared elements in the overlay at the same animated bounds,
- * so the grid cell and the preview must render the photo identically. Fit matches the preview's
- * Fit, which keeps the return animation a continuous shrink with no full-screen flash; Crop would
- * draw a differently-cropped image over the preview at the start of the return.
+ * During a shared transition only the *incoming* shared element is rendered (the grid on return),
+ * animating from the other side's bounds (the full-screen preview) down to this cell. To avoid the
+ * full-screen Crop flash it therefore crossfades from Fit (matching the preview at the start) to
+ * [contentScale] (Crop by default, the cell's resting look) as the grid branch enters.
  *
  * The photo is also preloaded at the preview's request size (the screen size) as soon as the cell
  * is composed, so the very first open of the preview never shows a blank flash while Coil decodes
@@ -117,7 +118,7 @@ fun SharedTransitionScope.SharedGridImage(
     animatedRadius: Dp,
     animatedVisibilityScope: AnimatedVisibilityScope,
     modifier: Modifier = Modifier,
-    contentScale: ContentScale = ContentScale.Fit,
+    contentScale: ContentScale = ContentScale.Crop,
 ) {
     val state = rememberSharedContentState(photoSharedKey(photo.mediaId))
     val context = LocalContext.current
@@ -129,6 +130,14 @@ fun SharedTransitionScope.SharedGridImage(
         )
         onDispose { disposable.dispose() }
     }
+    // While the grid branch is entering (the return transition) this goes 0 → 1 in step with the
+    // shared-element bounds animation. The shared element is the ONLY thing rendered during the
+    // transition and it animates from the preview's full-screen bounds down to this cell, so it
+    // must render Fit at the start (to match the preview) and Crop at the end (to match the cell).
+    val morph by animatedVisibilityScope.transition.animateFloat(
+        transitionSpec = { tween(PhotoTransitionMillis, easing = FastOutSlowInEasing) },
+        label = "gridMorph",
+    ) { s -> if (s == EnterExitState.Visible) 1f else 0f }
     Box(
         modifier
             .sharedElement(
@@ -138,7 +147,20 @@ fun SharedTransitionScope.SharedGridImage(
             )
             .clip(RoundedCornerShape(animatedRadius))
     ) {
-        AsyncImage(photo.uri, photo.displayName, Modifier.fillMaxSize(), contentScale = contentScale)
+        // Fit copy: matches the preview at the start of the return, then fades out.
+        AsyncImage(
+            photo.uri,
+            photo.displayName,
+            Modifier.fillMaxSize().alpha(1f - morph),
+            contentScale = ContentScale.Fit,
+        )
+        // Crop copy: fades in as the photo lands, giving the cell its 裁满 look.
+        AsyncImage(
+            photo.uri,
+            photo.displayName,
+            Modifier.fillMaxSize().alpha(morph),
+            contentScale = contentScale,
+        )
     }
 }
 
@@ -190,6 +212,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
     modifier: Modifier = Modifier,
     swipeDownToClose: Boolean = false,
     bottomControls: (@Composable (current: PhotoEntity) -> Unit)? = null,
+    sourceContentScale: ContentScale = ContentScale.Crop,
 ) {
     // Capture the list for this preview session: an in-preview restore/delete (which changes the
     // page's list) never yanks the pager out from under the exit animation.
@@ -202,6 +225,13 @@ fun SharedTransitionScope.SharedPhotoPreview(
     // While a shared transition is running the image is controlled by the transition; disable
     // pinch/pan so the two never fight over the same photo.
     val transitionActive = isTransitionActive
+    // While the preview branch is entering (the open transition) this goes 0 → 1 in step with the
+    // shared-element bounds animation. The shared element animates from the grid cell up to
+    // full-screen, so it must render the source scale at the start and Fit at the end.
+    val morph by animatedVisibilityScope.transition.animateFloat(
+        transitionSpec = { tween(PhotoTransitionMillis, easing = FastOutSlowInEasing) },
+        label = "previewMorph",
+    ) { s -> if (s == EnterExitState.Visible) 1f else 0f }
     var dragY by remember { mutableFloatStateOf(0f) }
     var zoomResetTick by remember { mutableIntStateOf(0) }
     var closePending by remember { mutableStateOf(false) }
@@ -301,7 +331,19 @@ fun SharedTransitionScope.SharedPhotoPreview(
                     )
                     .clip(RoundedCornerShape(animatedRadius))
             ) {
-                HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+                // Copy of the current photo in the source scale (Crop for the grids, Fit for the
+                // review card): matches the cell/card at the start of the open transition, then
+                // fades out as the photo expands to full-screen.
+                AsyncImage(
+                    currentPhoto.uri,
+                    currentPhoto.displayName,
+                    Modifier.fillMaxSize().alpha(1f - morph),
+                    contentScale = sourceContentScale,
+                )
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxSize().alpha(morph),
+                ) { page ->
                     ZoomablePhoto(
                         photo = openPhotos[page],
                         enabled = !transitionActive,
