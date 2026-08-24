@@ -25,6 +25,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -358,6 +359,10 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
         (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
     }
     val gridThumbSize = remember(gridCellPx) { CoilSize(gridCellPx, gridCellPx) }
+    // One grid row = cell + vertical spacing (8dp); approximates the scroll offset from the
+    // first visible item's index, used by the spring pull's limit detection.
+    val localDensity = LocalDensity.current
+    val gridRowPx = remember(gridCellPx) { gridCellPx + with(localDensity) { 8.dp.toPx() }.roundToInt() }
     // Preload thumbnails aggressively: a first batch immediately on entry (so the initial
     // viewports are decoded before the user scrolls), then a window around the visible range
     // while scrolling. The requests use the exact same data+size as the cells, so they fill
@@ -434,6 +439,25 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                         Spacer(Modifier.height(4.dp))
                         Text("长按选中，点击预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.height(8.dp))
+                        // Only the grid area is elastic: the header and buttons stay fixed, so the
+                        // pull (drag past the edge or the fling-limit spring) moves just the photos.
+                        // clipToBounds keeps the sliding grid from covering the header above it
+                        // (the pull is a translation, so without clipping it overlaps upward).
+                        SpringPullBox(
+                            modifier = Modifier.weight(1f).fillMaxWidth().clipToBounds(),
+                            pullAtTop = { (gridState.firstVisibleItemIndex * gridRowPx + gridState.firstVisibleItemScrollOffset).toFloat().coerceAtLeast(0f) },
+                            pullAtBottom = {
+                                val info = gridState.layoutInfo
+                                val last = info.visibleItemsInfo.lastOrNull()
+                                if (last == null || last.index < info.totalItemsCount - 1) {
+                                    // More content below the viewport: still scrollable, no bottom pull.
+                                    Float.MAX_VALUE
+                                } else {
+                                    val contentEnd = (last.offset.y + last.size.height + info.afterContentPadding).toFloat()
+                                    (contentEnd - info.viewportEndOffset.toFloat()).coerceAtLeast(0f)
+                                }
+                            },
+                        ) {
                         if (items.isEmpty()) {
                             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("回收站为空") }
                         } else {
@@ -442,7 +466,8 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                 columns = GridCells.Fixed(3),
                                 modifier = Modifier.fillMaxSize(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                flingBehavior = rememberGentleFlingBehavior()
                             ) {
                                 itemsIndexed(items) { index, photo ->
                                     val checked = selected.contains(photo.mediaId)
@@ -482,6 +507,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                     }
                                 }
                             }
+                        }
                         }
                     }
                 } else {
@@ -859,11 +885,18 @@ private fun formatTaken(taken: Long): String =
         }
     }
 
+    // Spring pull in both directions; engages only at the scroll limits (nested scroll also
+    // swallows the platform stretch overscroll).
+    SpringPullBox(
+        modifier = Modifier.fillMaxSize(),
+        pullAtTop = { scrollState.value.toFloat() },
+        pullAtBottom = { (scrollState.maxValue - scrollState.value).coerceAtLeast(0).toFloat() },
+    ) {
     Column(
         Modifier
             .fillMaxSize()
             .background(dc.pageBg)
-            .verticalScroll(scrollState)
+            .verticalScroll(scrollState, flingBehavior = rememberGentleFlingBehavior())
             .padding(horizontal = 20.dp)
     ) {
         Spacer(Modifier.height(18.dp))
@@ -1026,6 +1059,7 @@ private fun formatTaken(taken: Long): String =
             SettingNavRow("重置整理记录", { showResetConfirm = true }, dc)
         }
         Spacer(Modifier.height(24.dp))
+        }
     }
 
     if (showDatePicker) {
@@ -1221,6 +1255,10 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
         (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
     }
     val gridThumbSize = remember(gridCellPx) { CoilSize(gridCellPx, gridCellPx) }
+    // One grid row = cell + vertical spacing (6dp); approximates the scroll offset from the
+    // first visible item's index, used by the spring pull's limit detection.
+    val localDensity = LocalDensity.current
+    val gridRowPx = remember(gridCellPx) { gridCellPx + with(localDensity) { 6.dp.toPx() }.roundToInt() }
     val scope = rememberCoroutineScope()
     // System back (including the edge-swipe gesture) returns to the home screen. While the
     // preview is open, SharedPhotoPreview's own BackHandler (composed later) closes it first.
@@ -1282,6 +1320,24 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                             }
                         }
                         Spacer(Modifier.height(8.dp))
+                        // Only the grid is elastic: the header stays fixed, so the pull (drag past
+                        // the edge or the fling-limit spring) moves just the photos. clipToBounds
+                        // keeps the sliding grid from covering the header above it.
+                        SpringPullBox(
+                            modifier = Modifier.weight(1f).fillMaxWidth().clipToBounds(),
+                            pullAtTop = { (gridState.firstVisibleItemIndex * gridRowPx + gridState.firstVisibleItemScrollOffset).toFloat().coerceAtLeast(0f) },
+                        pullAtBottom = {
+                            val info = gridState.layoutInfo
+                            val last = info.visibleItemsInfo.lastOrNull()
+                            if (last == null || last.index < info.totalItemsCount - 1) {
+                                // More content below the viewport: still scrollable, no bottom pull.
+                                Float.MAX_VALUE
+                            } else {
+                                val contentEnd = (last.offset.y + last.size.height + info.afterContentPadding).toFloat()
+                                (contentEnd - info.viewportEndOffset.toFloat()).coerceAtLeast(0f)
+                            }
+                        },
+                    ) {
                         if (photos.isEmpty()) {
                             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                                 Text("暂无回忆", color = dc.slate)
@@ -1292,7 +1348,8 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                 columns = GridCells.Fixed(3),
                                 modifier = Modifier.fillMaxSize(),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                flingBehavior = rememberGentleFlingBehavior()
                             ) {
                                 itemsIndexed(photos) { index, photo ->
                                     Box(
@@ -1307,6 +1364,7 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                     }
                                 }
                             }
+                        }
                         }
                     }
                 } else {

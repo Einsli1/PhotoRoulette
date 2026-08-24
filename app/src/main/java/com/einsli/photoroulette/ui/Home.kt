@@ -51,26 +51,32 @@ private fun formatBytes(b: Long): String {
 @Composable
 fun Home(state: AppUiState, onStart: () -> Unit, onScan: () -> Unit, onOpenMemory: () -> Unit) {
     val dc = designColors()
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(dc.pageBg)
-            .padding(horizontal = 20.dp)
+    // Spring pull in both directions (Home doesn't scroll → direct drag gesture).
+    SpringPullBox(
+        modifier = Modifier.fillMaxSize(),
+        usePointer = true,
     ) {
-        // Minimal top elastic space — the content hugs the top so the task card and its
-        // photo preview get as much room as possible.
-        Spacer(Modifier.weight(0.02f))
-        Header()
-        Spacer(Modifier.height(12.dp))
-        TodayTaskCard(state, onStart, onScan)
-        Spacer(Modifier.height(16.dp))
-        ProgressSection(state)
-        Spacer(Modifier.height(14.dp))
-        StatsRow(state)
-        Spacer(Modifier.height(16.dp))
-        MemoryCard(state, onOpenMemory)
-        Spacer(Modifier.height(12.dp))
-        Spacer(Modifier.weight(0.2f))
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(dc.pageBg)
+                .padding(horizontal = 20.dp)
+        ) {
+            // Minimal top elastic space — the content hugs the top so the task card and its
+            // photo preview get as much room as possible.
+            Spacer(Modifier.weight(0.02f))
+            Header()
+            Spacer(Modifier.height(12.dp))
+            TodayTaskCard(state, onStart, onScan)
+            Spacer(Modifier.height(16.dp))
+            ProgressSection(state)
+            Spacer(Modifier.height(14.dp))
+            StatsRow(state)
+            Spacer(Modifier.height(16.dp))
+            MemoryCard(state, onOpenMemory)
+            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.weight(0.2f))
+        }
     }
 }
 

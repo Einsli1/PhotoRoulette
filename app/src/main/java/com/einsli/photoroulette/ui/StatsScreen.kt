@@ -45,6 +45,7 @@ private fun weekdayLabel(d: DayOfWeek): String = when (d) {
 @Composable
 fun StatsScreen(state: AppUiState) {
     val dc = designColors()
+    val scroll = rememberScrollState()
     val stats = state.stats
     val week = state.week
     val processed = state.processed
@@ -54,11 +55,18 @@ fun StatsScreen(state: AppUiState) {
     val daysLeft = if (state.settings.dailyCount > 0)
         ((total - processed).toDouble() / state.settings.dailyCount).let { kotlin.math.ceil(it).toInt() } else 0
 
+    // Spring pull in both directions; engages only at the scroll limits (nested scroll also
+    // swallows the platform stretch overscroll).
+    SpringPullBox(
+        modifier = Modifier.fillMaxSize(),
+        pullAtTop = { scroll.value.toFloat() },
+        pullAtBottom = { (scroll.maxValue - scroll.value).coerceAtLeast(0).toFloat() },
+    ) {
     Column(
         Modifier
             .fillMaxSize()
             .background(dc.pageBg)
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll, flingBehavior = rememberGentleFlingBehavior())
             .padding(horizontal = 20.dp)
     ) {
         Spacer(Modifier.height(18.dp))
@@ -167,6 +175,7 @@ fun StatsScreen(state: AppUiState) {
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
     }
 }
 
