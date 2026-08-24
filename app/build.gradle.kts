@@ -12,8 +12,8 @@ android {
         applicationId = "com.einsli.photoroulette"
         minSdk = 36
         targetSdk = 36
-        versionCode = 13
-        versionName = "1.5"
+        versionCode = 14
+        versionName = "1.6"
     }
     buildFeatures { compose = true; buildConfig = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.15" }
