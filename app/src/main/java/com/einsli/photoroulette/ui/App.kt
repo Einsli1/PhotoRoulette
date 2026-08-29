@@ -31,7 +31,11 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import android.app.AlarmManager
+import android.content.Intent
+import android.net.Uri
 import android.os.SystemClock
+import android.provider.Settings
 import android.widget.NumberPicker
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -98,11 +102,19 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
     else -> TransformOrigin(0.5f, 0.5f)
 }
 
-@Composable fun PhotoRouletteApp(viewModel: PhotoViewModel, onAction: (Long, PhotoState, Int, Long) -> Boolean, onCommitDeletes: () -> Unit, onRestoreFromTrash: (List<Long>) -> Unit) {
+@Composable fun PhotoRouletteApp(viewModel: PhotoViewModel, onAction: (Long, PhotoState, Int, Long) -> Boolean, onCommitDeletes: () -> Unit, onRestoreFromTrash: (List<Long>) -> Unit, openReviewRequest: Int = 0) {
     val state by viewModel.ui.collectAsStateWithLifecycle()
     // Collected at the app level so the value is already loaded when the RecycleBin opens.
     val trashItems by viewModel.trashItems.collectAsStateWithLifecycle(emptyList())
-    var page by rememberSaveable { mutableIntStateOf(0) }
+    var page by rememberSaveable { mutableIntStateOf(if (openReviewRequest > 0) 2 else 0) }
+    // 通知/系统闹钟点击后直达整理页(openReviewRequest 由 MainActivity 递增)。冷启动时初始 page
+    // 已落在 2 上,这里只负责后续的再次导航;无进行中会话时和首页「开始整理」一样重建一个。
+    LaunchedEffect(openReviewRequest) {
+        if (openReviewRequest == 0) return@LaunchedEffect
+        val inProgress = state.session != null && state.remaining > 0
+        if (!inProgress) viewModel.reload()
+        page = 2
+    }
     // Hoisted so the Settings scroll position survives navigating away and back.
     val settingsScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
     // Manual snapshot of the Settings scroll value: AnimatedContent re-composes the page, and
@@ -970,6 +982,27 @@ private fun formatTaken(taken: Long): String =
                         selected = minute,
                         onValueChange = { minute = it; vm.setReminderMinute(it) }
                     )
+                }
+            }
+            // SCHEDULE_EXACT_ALARM 在 Android 14+ 默认拒绝,没有它提醒可能延迟几分钟。
+            // 点这行进系统设置授权,回来(onResume)后会自动改用精确闹钟。
+            val ctx = LocalContext.current
+            val exactAlarmAvailable = runCatching { ctx.getSystemService(AlarmManager::class.java).canScheduleExactAlarms() }.getOrDefault(false)
+            if (!exactAlarmAvailable) {
+                HorizontalDivider(color = dc.track.copy(alpha = 0.6f))
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable {
+                        runCatching {
+                            ctx.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:${ctx.packageName}")))
+                        }
+                    }.padding(vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("提醒精确到分钟", fontSize = 14.sp, color = dc.ink)
+                        Text("未授权时提醒可能延迟,点击去系统设置开启", fontSize = 11.sp, color = dc.labelGray)
+                    }
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = dc.labelGray, modifier = Modifier.size(18.dp))
                 }
             }
         }

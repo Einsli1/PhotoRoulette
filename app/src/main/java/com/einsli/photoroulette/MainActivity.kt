@@ -2,6 +2,7 @@ package com.einsli.photoroulette
 
 import android.Manifest
 import android.app.RecoverableSecurityException
+import android.content.Intent
 import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -13,6 +14,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import coil.Coil
@@ -22,9 +24,14 @@ import com.einsli.photoroulette.data.*
 import com.einsli.photoroulette.media.MediaScanner
 import com.einsli.photoroulette.ui.PhotoRouletteApp
 import com.einsli.photoroulette.worker.ReminderScheduler
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** 通知/系统闹钟点击携带该 extra 时,App 直达整理页(路由见 ui/App.kt 的 openReviewRequest)。 */
+        const val EXTRA_OPEN_REVIEW = "com.einsli.photoroulette.open_review"
+    }
     private val database by lazy { PhotoDatabase.create(applicationContext) }
     private val settings by lazy { SettingsRepository(applicationContext) }
     private val repository by lazy { PhotoRepository(database.photoDao(), MediaScanner(contentResolver), settings) }
@@ -32,6 +39,8 @@ class MainActivity : ComponentActivity() {
     private enum class PendingOp { TRASH, RESTORE }
     private var pendingOp: PendingOp? = null
     private var pendingIds: List<Long> = emptyList()
+    // 每次"/通知点开直达整理页"请求 +1,驱动 Compose 侧重新导航(冷启动时由初始值直接落到整理页)。
+    private val openReviewRequest = mutableIntStateOf(0)
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
         if (granted.values.any { it }) Toast.makeText(this, "已授权相册访问，请点击“重新扫描相册”选择要包含的相册。", Toast.LENGTH_LONG).show()
     }
@@ -65,16 +74,35 @@ class MainActivity : ComponentActivity() {
         Coil.setImageLoader {
             ImageLoader.Builder(applicationContext).components { add(VideoFrameDecoder.Factory()) }.build()
         }
-        ReminderScheduler.schedule(this, 20, 0)
+        if (intent.getBooleanExtra(EXTRA_OPEN_REVIEW, false)) openReviewRequest.intValue = 1
+        // 用设置的提醒时间重排每日闹钟(不依赖上一次打开时硬编码的 20:00)。DataStore 读取失败时
+        // 退回默认时间,保证闹钟总能被注册。
+        rescheduleFromSettings()
         requestPermissionsIfNeeded()
         setContent {
             PhotoRouletteApp(
                 viewModel = viewModel,
                 onAction = { mediaId, state, dir, userTouchedAt -> viewModel.action(mediaId, state, dir, userTouchedAt) },
                 onCommitDeletes = ::movePendingToTrash,
-                onRestoreFromTrash = ::restoreFromSystemTrash
+                onRestoreFromTrash = ::restoreFromSystemTrash,
+                openReviewRequest = openReviewRequest.intValue
             )
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_OPEN_REVIEW, false)) openReviewRequest.intValue++
+    }
+
+    // 注意:刻意不在 onResume 里重排闹钟。onResume 重排会与 onCreate 的重排竞态——onCreate 刚
+    // 补发(now+15s)后 onResume 读到新状态又按 SET 语义换回明天,把补发取消(真机已复现)。
+    // 权限变化(精确闹钟授权)后的升级会在下一次触发的重排里自然生效。
+
+    private fun rescheduleFromSettings() = lifecycleScope.launch {
+        val cfg = try { settings.settings.first() } catch (_: Exception) { AppSettings() }
+        ReminderScheduler.schedule(this@MainActivity, cfg.reminderHour, cfg.reminderMinute, replace = false)
     }
 
     private fun requestPermissionsIfNeeded() {
