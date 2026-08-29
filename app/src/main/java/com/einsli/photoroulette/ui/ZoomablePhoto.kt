@@ -12,12 +12,15 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -31,13 +34,25 @@ import coil.compose.AsyncImage
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import com.einsli.photoroulette.data.PhotoEntity
+import kotlin.math.abs
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+/** 双击判定窗口（略短于系统默认，让单击响应更快）。 */
+private const val DoubleTapMillis = 250L
 
 /**
- * 全屏照片：双指缩放（1x–5x）+ 平移。
+ * 全屏照片：双指缩放（1x–5x）+ 平移 + 双击 1x↔3x 缩放 + 单击回调。
  *
  * [enabled] 为 false（shared element 转场进行中）时忽略手势，避免转场和缩放同时控制图片。
  * [resetTick] 递增时先把缩放/平移动画回缩到基础状态（1x、居中），再回调 [onResetDone]——
  * 关闭预览前先恢复基础态，shared element 返回动画就不会从 3x 等用户变换状态起跳。
+ *
+ * 单击与双击在同一手势循环里手动区分（不依赖 unconsumed 事件）：缩放状态下平移会消费
+ * 事件，若用外部 detectTapGestures 会因事件被消费而永远收不到单击/双击。
+ * [onTap] 单击回调（延迟双击窗口后触发，双击时不触发）；[doubleTapZoom] 开启后双击在
+ * 1x 与 3x 之间切换（仅在已放大时允许缩小回 1x）。
  */
 @Composable
 fun ZoomablePhoto(
@@ -47,12 +62,54 @@ fun ZoomablePhoto(
     resetTick: Int = 0,
     onResetDone: () -> Unit = {},
     placeholderRequest: ImageRequest? = null,
+    onTap: () -> Unit = {},
+    doubleTapZoom: Boolean = false,
 ) {
     var scale by remember(photo.mediaId) { mutableFloatStateOf(1f) }
     var offsetX by remember(photo.mediaId) { mutableFloatStateOf(0f) }
     var offsetY by remember(photo.mediaId) { mutableFloatStateOf(0f) }
     var viewportW by remember(photo.mediaId) { mutableIntStateOf(0) }
     var viewportH by remember(photo.mediaId) { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    // 双击判定：上一次单击的时间/位置，以及延迟到双击窗口结束才触发的单击任务。
+    var lastTapTime by remember(photo.mediaId) { mutableLongStateOf(0L) }
+    var lastTapX by remember(photo.mediaId) { mutableFloatStateOf(0f) }
+    var lastTapY by remember(photo.mediaId) { mutableFloatStateOf(0f) }
+    var pendingSingleTap by remember(photo.mediaId) { mutableStateOf<Job?>(null) }
+    DisposableEffect(photo.mediaId) {
+        onDispose { pendingSingleTap?.cancel() }
+    }
+
+    // 双击缩放：1x → 3x（以双击点为中心放大），>1x → 1x（回中缩小）。
+    fun handleDoubleTap(tapX: Float, tapY: Float) {
+        if (!doubleTapZoom) return
+        val fromScale = scale
+        val toScale = if (fromScale > 1f) 1f else 3f
+        val fromX = offsetX
+        val fromY = offsetY
+        var toX = 0f
+        var toY = 0f
+        if (toScale > 1f) {
+            // graphicsLayer 的 scale 默认以节点中心 (C) 为原点：p = T + S*c + (1-S)*C，
+            // 所以保持双击点不动需要 T' = T + (S - S') * (tap - C)。
+            // 指针位置已处于内容坐标系（即 c），直接代入即可。
+            val centerX = viewportW / 2f
+            val centerY = viewportH / 2f
+            toX = fromX + (fromScale - toScale) * (tapX - centerX)
+            toY = fromY + (fromScale - toScale) * (tapY - centerY)
+            val maxPanX = (viewportW * (toScale - 1f)) / 2f
+            val maxPanY = (viewportH * (toScale - 1f)) / 2f
+            toX = toX.coerceIn(-maxPanX, maxPanX)
+            toY = toY.coerceIn(-maxPanY, maxPanY)
+        }
+        scope.launch {
+            animate(0f, 1f, animationSpec = tween(220, easing = FastOutSlowInEasing)) { p, _ ->
+                scale = fromScale + (toScale - fromScale) * p
+                offsetX = fromX + (toX - fromX) * p
+                offsetY = fromY + (toY - fromY) * p
+            }
+        }
+    }
 
     // Fixed-size request (the screen size) instead of the constraint-based default: the request
     // key is stable across the shared-element transition (no re-decodes as the animated bounds
@@ -135,19 +192,32 @@ fun ZoomablePhoto(
                     translationX = offsetX; translationY = offsetY
                 }
                 .alpha(fullAlpha)
-                .pointerInput(photo.mediaId, enabled) {
+                .pointerInput(photo.mediaId, enabled, doubleTapZoom) {
                     if (!enabled) return@pointerInput
+                    val slop = viewConfiguration.touchSlop
+                    val doubleTapDistPx = slop * 2f
                     awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        // Single finger pans only while already zoomed; otherwise leave the events
-                        // unconsumed so the pager (horizontal) or swipe-down dismiss (vertical)
-                        // handles them. A second finger always starts a pinch-zoom that consumes
-                        // everything.
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val downX = down.position.x
+                        val downY = down.position.y
+                        val downTime = down.uptimeMillis
                         var consumed = scale > 1f
+                        var multiTouch = false
+                        var maxMoveSq = 0f
                         while (true) {
                             val event = awaitPointerEvent()
                             val pressed = event.changes.count { it.pressed }
-                            if (pressed >= 2) consumed = true
+                            if (pressed >= 2) {
+                                consumed = true
+                                multiTouch = true
+                            }
+                            // 记录主手指离按下点的距离，用于区分「点击」与「拖动」。
+                            val primary = event.changes.firstOrNull()
+                            if (primary != null && primary.pressed) {
+                                val dx = primary.position.x - downX
+                                val dy = primary.position.y - downY
+                                maxMoveSq = maxOf(maxMoveSq, dx * dx + dy * dy)
+                            }
                             if (consumed) {
                                 val zoom = event.calculateZoom()
                                 val pan = event.calculatePan()
@@ -173,6 +243,30 @@ fun ZoomablePhoto(
                             if (pressed == 0) break
                         }
                         if (scale <= 1f) { offsetX = 0f; offsetY = 0f }
+                        // 单击/双击判定：没有移动、没有多指才算点击。单击延迟双击窗口后触发，
+                        // 双击取消待触发的单击并执行缩放。
+                        val isTap = !multiTouch && maxMoveSq <= slop * slop
+                        if (isTap) {
+                            val isDoubleTap = lastTapTime != 0L &&
+                                downTime - lastTapTime <= DoubleTapMillis &&
+                                abs(downX - lastTapX) <= doubleTapDistPx &&
+                                abs(downY - lastTapY) <= doubleTapDistPx
+                            if (isDoubleTap) {
+                                pendingSingleTap?.cancel()
+                                pendingSingleTap = null
+                                lastTapTime = 0L
+                                handleDoubleTap(downX, downY)
+                            } else {
+                                lastTapTime = downTime
+                                lastTapX = downX
+                                lastTapY = downY
+                                pendingSingleTap?.cancel()
+                                pendingSingleTap = scope.launch {
+                                    delay(DoubleTapMillis)
+                                    onTap()
+                                }
+                            }
+                        }
                     }
                 },
             contentScale = ContentScale.Fit,

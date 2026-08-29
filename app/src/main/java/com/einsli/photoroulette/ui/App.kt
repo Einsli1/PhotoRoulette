@@ -366,7 +366,14 @@ private fun TrashPageBackdrop(
     thumbSize: CoilSize,
 ) {
     val allIds = items.map { it.mediaId }.toSet()
-    Column(Modifier.fillMaxSize().systemBarsPadding().padding(12.dp)) {
+    val statusBarTop = rememberStatusBarTop()
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(top = statusBarTop)
+            .navigationBarsPadding()
+            .padding(12.dp)
+    ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("回收站", style = MaterialTheme.typography.headlineMedium)
             Button(onClick = {}) { Text("返回") }
@@ -428,7 +435,14 @@ private fun MemoryPageBackdrop(
     thumbSize: CoilSize,
     dc: DesignColors,
 ) {
-    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp)) {
+    val statusBarTop = rememberStatusBarTop()
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(top = statusBarTop)
+            .navigationBarsPadding()
+            .padding(horizontal = 20.dp)
+    ) {
         Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = {}) { Icon(Icons.Default.Close, "返回") }
@@ -543,7 +557,14 @@ private fun MemoryPageBackdrop(
                 if (target == null) {
                     // ── Grid branch ──
                     val radius = photoBranchRadius(gridCornerRadius = 8.dp, gridSide = true)
-                    Column(Modifier.fillMaxSize().systemBarsPadding().padding(12.dp)) {
+                    val statusBarTop = rememberStatusBarTop()
+                    Column(
+                        Modifier
+                            .fillMaxSize()
+                            .padding(top = statusBarTop)
+                            .navigationBarsPadding()
+                            .padding(12.dp)
+                    ) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Text("回收站", style = MaterialTheme.typography.headlineMedium)
                             Button(onBack) { Text("返回") }
@@ -649,6 +670,9 @@ private fun MemoryPageBackdrop(
                         animatedVisibilityScope = this@AnimatedContent,
                         swipeDownToClose = true,
                         sourceThumbSize = gridThumbSize,
+                        fullScreenPhotoArea = true,
+                        tapToToggleChrome = true,
+                        doubleTapToZoom = true,
                         onClose = { current ->
                             scope.launch {
                                 closedMediaId = current.mediaId
@@ -691,13 +715,16 @@ private fun MemoryPageBackdrop(
     }
 }
 
-@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable private fun Review(session: ReviewSession?, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, onDone: () -> Unit, onBack: () -> Unit) {
-    // System back (including the edge-swipe gesture) returns to the home screen. While the
-    // full-screen preview is open, SharedPhotoPreview's own BackHandler (composed later) wins
-    // and closes the preview first.
-    BackHandler(onBack = onBack)
-    var previewOpen by remember { mutableStateOf(false) }
+    // 离开整理页前先把状态栏恢复（chrome 隐藏时状态栏也藏了；若等到分支销毁才恢复，
+    // 主页首帧布局用的是"状态栏隐藏"的 insets，状态栏弹回时整页跳位闪一下）。
+    val reviewActivity = LocalContext.current as? android.app.Activity
+    fun leaveReview() {
+        reviewActivity?.window?.insetsController?.show(android.view.WindowInsets.Type.statusBars())
+        onBack()
+    }
+    // System back (including the edge-swipe gesture) returns to the home screen.
+    BackHandler(onBack = ::leaveReview)
     // Light zoom-in when a NEW session arrives while already on this page (处理删除并继续整理).
     val animScale = remember { Animatable(1f) }
     var seenSessionId by remember { mutableStateOf<Long?>(null) }
@@ -710,78 +737,78 @@ private fun MemoryPageBackdrop(
         seenSessionId = id
     }
     val dc = designColors()
-    val current = session?.current
-    // Fixed thumbnail size shared by the card, the preview's source-scale copy and the preview
-    // placeholder, so the first preview open reuses the already-loaded card bitmap instead of
-    // showing a blank gap while the full-screen copy decodes.
-    val config = LocalConfiguration.current
-    val density = LocalDensity.current.density
-    val cardThumbSize = remember {
-        CoilSize(
-            (config.screenWidthDp * density).roundToInt(),
-            ((config.screenHeightDp - 190).coerceAtLeast(240) * density).roundToInt(),
-        )
+    val s = session
+    // 全屏效果（与回收站/回忆时光机预览一致）：单击照片隐藏/显示标题和按钮，双击缩放。
+    // 不再有单独的"放大查看"预览——整理页本身就是全屏预览。
+    var chromeHidden by remember { mutableStateOf(false) }
+    val chromeProgress by animateFloatAsState(
+        targetValue = if (chromeHidden) 1f else 0f,
+        animationSpec = tween(250, easing = FastOutSlowInEasing),
+        label = "reviewChrome",
+    )
+    val chromeExitPx = with(LocalDensity.current) { 140.dp.toPx() }
+    // 视频控制条悬浮在底部按钮行(~72dp)上方。
+    val density = LocalDensity.current
+    val videoBarBottomInset: Dp = with(density) {
+        (WindowInsets.navigationBars.getBottom(density) + 84.dp.toPx()).toDp()
     }
-    PhotoSharedTransitionLayout {
-        Box(Modifier.fillMaxSize()) {
-            AnimatedContent(
-                targetState = if (previewOpen && current != null) 0 else null,
-                transitionSpec = {
-                    fadeIn(tween(PhotoTransitionMillis)) togetherWith fadeOut(tween(PhotoTransitionMillis))
-                },
-                label = "reviewPreview",
-            ) { target ->
-                if (target == null) {
-                    // ── Card branch ──
-                    val radius = photoBranchRadius(gridCornerRadius = 20.dp, gridSide = true)
-                    Column(
-                        Modifier
-                            .fillMaxSize()
-                            .background(dc.pageBg)
-                            // Review is composed full-bleed; inset ourselves so the header stays
-                            // clear of the status bar.
-                            .systemBarsPadding()
-                            .padding(horizontal = 20.dp)
-                            .graphicsLayer {
-                                scaleX = animScale.value
-                                scaleY = animScale.value
-                            }
-                    ) {
-                        Spacer(Modifier.height(10.dp))
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
-                            Text("本次整理", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = dc.ink, modifier = Modifier.weight(1f))
-                            Text("剩余 ${session?.remaining ?: 0} / ${session?.queue?.size ?: 0}", fontSize = 13.sp, color = dc.slate)
-                        }
-                        Spacer(Modifier.height(12.dp))
-                        val s = session
-                        when {
-                            // No loading spinner: render nothing until the session is published.
-                            s == null -> Box(Modifier.fillMaxWidth().weight(1f))
-                            s.current == null -> Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                                Text("本次完成！", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = dc.ink)
-                                Spacer(Modifier.height(16.dp))
-                                Button(onClick = onDone, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White)) { Text("处理删除并继续整理") }
-                            }
-                            else -> Box(Modifier.fillMaxWidth().weight(1f)) {
-                                SwipePhoto(s, onAction, onUndo, animatedRadius = radius, animatedVisibilityScope = this@AnimatedContent, cardThumbSize = cardThumbSize, onTapPhoto = { previewOpen = true })
-                            }
-                        }
-                    }
-                } else {
-                    // ── Preview branch ──
-                    if (current != null) {
-                        SharedPhotoPreview(
-                            photos = listOf(current),
-                            initialIndex = 0,
-                            animatedRadius = photoBranchRadius(gridCornerRadius = 20.dp, gridSide = false),
-                            animatedVisibilityScope = this@AnimatedContent,
-                            sourceContentScale = ContentScale.Fit,
-                            sourceThumbSize = cardThumbSize,
-                            onClose = { previewOpen = false },
-                        )
-                    }
+    // 状态栏高度在进入页面时固定捕获：状态栏隐藏时标题/时间戳不会跳位。
+    val statusBarTop = rememberStatusBarTop()
+    // 系统状态栏随标题/按钮一起隐藏/显示（本次完成时恢复）。
+    SyncStatusBarWithChrome(chromeHidden && s?.current != null)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(dc.pageBg)
+            .graphicsLayer {
+                scaleX = animScale.value
+                scaleY = animScale.value
+            }
+    ) {
+        when {
+            // No loading spinner: render nothing until the session is published.
+            s == null -> Box(Modifier.fillMaxSize())
+            s.current == null -> Column(
+                Modifier.fillMaxSize().padding(horizontal = 40.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text("本次完成！", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onDone, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White)) { Text("处理删除并继续整理") }
+            }
+            else -> SwipePhoto(
+                session = s,
+                onAction = onAction,
+                onUndo = onUndo,
+                onTap = { chromeHidden = !chromeHidden },
+                videoBarBottomInset = videoBarBottomInset,
+                chromeProgress = chromeProgress,
+                chromeExitPx = chromeExitPx,
+                statusBarTop = statusBarTop,
+            )
+        }
+        // ── 浮动标题（只有正在看图时显示；单击照片可隐藏）──
+        if (s?.current != null) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(top = statusBarTop)
+                    .navigationBarsPadding()
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .graphicsLayer { translationY = -chromeProgress * chromeExitPx },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = ::leaveReview) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = Color.White) }
+                    Text("本次整理", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.weight(1f))
+                    Text("剩余 ${s.remaining} / ${s.queue.size}", fontSize = 13.sp, color = Color.White.copy(alpha = 0.8f))
                 }
+                Spacer(Modifier.weight(1f))
             }
         }
     }
@@ -790,8 +817,7 @@ private fun MemoryPageBackdrop(
 private fun formatTaken(taken: Long): String =
     if (taken <= 0L) "" else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(taken))
 
-@OptIn(ExperimentalSharedTransitionApi::class)
-@Composable private fun SharedTransitionScope.SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, animatedRadius: Dp, animatedVisibilityScope: AnimatedVisibilityScope, cardThumbSize: CoilSize, onTapPhoto: (PhotoEntity) -> Unit) {
+@Composable private fun SwipePhoto(session: ReviewSession, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, onTap: () -> Unit, videoBarBottomInset: Dp, chromeProgress: Float, chromeExitPx: Float, statusBarTop: Dp) {
     val dc = designColors()
     val photo = session.current!!
     val next = session.queue.getOrNull(session.position + 1)
@@ -801,21 +827,21 @@ private fun formatTaken(taken: Long): String =
     // handwriting/accessibility service injects clicks with NO pointer events, so the
     // ViewModel can tell real swipes from injected ones by comparing this with cardShownAt.
     var userTouchedAt by remember { mutableStateOf(0L) }
-    // Drag offset of the current (top) card.
+    // Drag offset of the current (top) photo.
     var dragX by remember { mutableFloatStateOf(0f) }
     var dragY by remember { mutableFloatStateOf(0f) }
-    // The card currently flying out after an accepted swipe. Kept separate from the current card
-    // so it keeps animating off-screen after the session advances to the next photo.
+    // The photo currently flying out after an accepted swipe. Kept separate from the current
+    // photo so it keeps animating off-screen after the session advances to the next one.
     var flyingPhoto by remember { mutableStateOf<PhotoEntity?>(null) }
     var flyingX by remember { mutableFloatStateOf(0f) }
     var flyingY by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
-    // Undo slide-in: when returning to the previous card it slides back in from the side it was
-    // swiped away to (kept → from the right, deleted → from the left), covering the card that
-    // was shown after it — that card stays visible underneath the whole time. The Animatable is
-    // re-created per photo and starts at the off-screen position directly, so the returning card
+    // Undo slide-in: when returning to the previous photo it slides back in from the side it was
+    // swiped away to (kept → from the right, deleted → from the left), covering the photo that
+    // was shown after it — that photo stays visible underneath the whole time. The Animatable is
+    // re-created per photo and starts at the off-screen position directly, so the returning photo
     // never renders centered and then jumps off-screen (that snap looked like a flash / "two
-    // cards").
+    // photos").
     var prevPosition by remember { mutableIntStateOf(session.position) }
     val undoFrom = remember(photo.mediaId) {
         // lastActionDir is NEGATED by the undo (the ViewModel mirrors the direction), so a keep
@@ -833,9 +859,15 @@ private fun formatTaken(taken: Long): String =
         prevPosition = session.position
         if (slideInX.value != 0f) slideInX.animateTo(0f, tween(260, easing = FastOutSlowInEasing))
     }
-    Column(
+    // 全屏占位小图（ZoomablePhoto 的大图解码完成前先显示它，避免空白）。
+    val context = LocalContext.current
+    val placeholderSize = remember { CoilSize(480, 480) }
+    val placeholder = remember(photo.uri, placeholderSize) { photoThumbRequest(context, photo, placeholderSize) }
+
+    Box(
         Modifier
             .fillMaxSize()
+            .background(Color.Black)
             .pointerInput(Unit) {
                 awaitPointerEventScope {
                     while (true) {
@@ -845,92 +877,73 @@ private fun formatTaken(taken: Long): String =
                 }
             }
     ) {
-        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-            // Next card behind — revealed as the current card is dragged away, so the next photo
-            // shows DURING the swipe instead of only after the current one is fully gone. Same
-            // request key as the current card's SharedGridImage (cardThumbSize), so when it
-            // becomes current it is an instant cache hit instead of a fresh decode (which flashed).
-            if (next != null) {
-                VideoAwareImage(
-                    next,
-                    Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).background(dc.pageBg),
-                    contentScale = ContentScale.Fit,
-                    thumbSize = cardThumbSize
-                )
-            }
-            // Current card on top, draggable. Its image is the shared element: it flies to the
-            // full-screen preview (放大查看) and back.
-            Box(
-                Modifier.fillMaxSize()
-                    .clip(RoundedCornerShape(20.dp))
-                    .graphicsLayer {
-                        translationX = dragX + slideInX.value; translationY = dragY
-                        rotationZ = (dragX / 35f).coerceIn(-25f, 25f)
-                    }
-                    .background(dc.pageBg)
-                    .pointerInput(photo.mediaId) {
-                        detectDragGestures(
-                            onDrag = { change, amount ->
-                                change.consume()
-                                dragX += amount.x; dragY += amount.y
-                            },
-                            onDragEnd = {
-                                val dir: Int
-                                val state: PhotoState
-                                when {
-                                    dragX < -swipeThreshold -> { dir = -1; state = PhotoState.DELETE_PENDING }
-                                    dragX > swipeThreshold -> { dir = 1; state = PhotoState.KEEP }
-                                    else -> { dir = 0; state = PhotoState.KEEP }
-                                }
-                                val startX = dragX
-                                val startY = dragY
-                                if (dir != 0) {
-                                    // Reset the top card's offset synchronously so the next card starts
-                                    // centered once the session advances; the swiped card keeps flying
-                                    // out via [flyingPhoto]/[flyingX]/[flyingY].
-                                    dragX = 0f
-                                    dragY = 0f
-                                    // The card asks the ViewModel to advance ITSELF by its own mediaId
-                                    // plus the swipe direction. The ViewModel only advances if this photo
-                                    // is still current, so a ghost drag can never advance the next card.
-                                    if (onAction(photo.mediaId, state, dir, userTouchedAt)) {
-                                        val dirX = if (startX < 0f) -1f else 1f
-                                        val endX = dirX * flyOutDistance
-                                        flyingPhoto = photo
-                                        flyingX = startX
-                                        flyingY = startY
-                                        scope.launch {
-                                            val start = System.currentTimeMillis()
-                                            while (true) {
-                                                val t = ((System.currentTimeMillis() - start).toFloat() / 180f).coerceIn(0f, 1f)
-                                                val eased = 1f - (1f - t) * (1f - t)
-                                                flyingX = startX + (endX - startX) * eased
-                                                flyingY = startY * (1f - eased)
-                                                if (t >= 1f) break
-                                                withFrameMillis { }
-                                            }
-                                            flyingPhoto = null
+        // Next photo behind — full-screen, revealed as the current photo is dragged away.
+        if (next != null) {
+            VideoAwareImage(
+                next,
+                Modifier.fillMaxSize().background(Color.Black),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        // Current photo on top, draggable (swipe to keep/delete), full-screen. Photos support
+        // pinch-zoom/pan + double-tap 1x↔3x; videos play inline. Single tap toggles the chrome
+        // (title + buttons) via [onTap].
+        Box(
+            Modifier.fillMaxSize()
+                .graphicsLayer {
+                    translationX = dragX + slideInX.value; translationY = dragY
+                    rotationZ = (dragX / 35f).coerceIn(-25f, 25f)
+                }
+                .background(Color.Black)
+                .pointerInput(photo.mediaId) {
+                    detectDragGestures(
+                        onDrag = { change, amount ->
+                            change.consume()
+                            dragX += amount.x; dragY += amount.y
+                        },
+                        onDragEnd = {
+                            val dir: Int
+                            val state: PhotoState
+                            when {
+                                dragX < -swipeThreshold -> { dir = -1; state = PhotoState.DELETE_PENDING }
+                                dragX > swipeThreshold -> { dir = 1; state = PhotoState.KEEP }
+                                else -> { dir = 0; state = PhotoState.KEEP }
+                            }
+                            val startX = dragX
+                            val startY = dragY
+                            if (dir != 0) {
+                                // Reset the top photo's offset synchronously so the next photo starts
+                                // centered once the session advances; the swiped photo keeps flying
+                                // out via [flyingPhoto]/[flyingX]/[flyingY].
+                                dragX = 0f
+                                dragY = 0f
+                                // The photo asks the ViewModel to advance ITSELF by its own mediaId
+                                // plus the swipe direction. The ViewModel only advances if this photo
+                                // is still current, so a ghost drag can never advance the next photo.
+                                if (onAction(photo.mediaId, state, dir, userTouchedAt)) {
+                                    val dirX = if (startX < 0f) -1f else 1f
+                                    val endX = dirX * flyOutDistance
+                                    flyingPhoto = photo
+                                    flyingX = startX
+                                    flyingY = startY
+                                    scope.launch {
+                                        val start = System.currentTimeMillis()
+                                        while (true) {
+                                            val t = ((System.currentTimeMillis() - start).toFloat() / 180f).coerceIn(0f, 1f)
+                                            val eased = 1f - (1f - t) * (1f - t)
+                                            flyingX = startX + (endX - startX) * eased
+                                            flyingY = startY * (1f - eased)
+                                            if (t >= 1f) break
+                                            withFrameMillis { }
                                         }
-                                    } else {
-                                        // ViewModel refused: restore the offset and ease back to center.
-                                        dragX = startX
-                                        dragY = startY
-                                        scope.launch {
-                                            val sx = startX; val sy = startY
-                                            val start = System.currentTimeMillis()
-                                            while (true) {
-                                                val t = ((System.currentTimeMillis() - start).toFloat() / 150f).coerceIn(0f, 1f)
-                                                val eased = 1f - (1f - t) * (1f - t)
-                                                dragX = sx * (1f - eased); dragY = sy * (1f - eased)
-                                                if (t >= 1f) break
-                                                withFrameMillis { }
-                                            }
-                                        }
+                                        flyingPhoto = null
                                     }
                                 } else {
-                                    // Below threshold: ease back to center.
+                                    // ViewModel refused: restore the offset and ease back to center.
+                                    dragX = startX
+                                    dragY = startY
                                     scope.launch {
-                                        val sx = dragX; val sy = dragY
+                                        val sx = startX; val sy = startY
                                         val start = System.currentTimeMillis()
                                         while (true) {
                                             val t = ((System.currentTimeMillis() - start).toFloat() / 150f).coerceIn(0f, 1f)
@@ -941,53 +954,92 @@ private fun formatTaken(taken: Long): String =
                                         }
                                     }
                                 }
+                            } else {
+                                // Below threshold: ease back to center.
+                                scope.launch {
+                                    val sx = dragX; val sy = dragY
+                                    val start = System.currentTimeMillis()
+                                    while (true) {
+                                        val t = ((System.currentTimeMillis() - start).toFloat() / 150f).coerceIn(0f, 1f)
+                                        val eased = 1f - (1f - t) * (1f - t)
+                                        dragX = sx * (1f - eased); dragY = sy * (1f - eased)
+                                        if (t >= 1f) break
+                                        withFrameMillis { }
+                                    }
+                                }
                             }
-                        )
-                    }
-                    .pointerInput(photo.mediaId) {
-                        // Tap opens the full-screen 放大查看 preview; drags (swipe to keep/delete)
-                        // are unaffected — detectTapGestures cancels once the finger moves past slop.
-                        detectTapGestures(onTap = { onTapPhoto(photo) })
-                    }
-            ) {
-                SharedGridImage(photo, animatedRadius, animatedVisibilityScope, Modifier.fillMaxSize(), contentScale = ContentScale.Fit, gridSize = cardThumbSize)
-                VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 48.dp, textSize = 12)
-            }
-            // Flying-out card on top (rendered last = topmost), so it visibly slides off over
-            // the already-revealed next card.
-            val flying = flyingPhoto
-            if (flying != null) {
-                VideoAwareImage(
-                    flying,
-                    Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).graphicsLayer {
-                        translationX = flyingX
-                        translationY = flyingY
-                        rotationZ = (flyingX / 35f).coerceIn(-25f, 25f)
-                    }.background(dc.pageBg),
-                    contentScale = ContentScale.Fit,
-                    thumbSize = cardThumbSize
+                        }
+                    )
+                }
+        ) {
+            if (photo.mimeType.startsWith("video/")) {
+                VideoPhoto(
+                    photo = photo,
+                    active = true,
+                    resetTick = 0,
+                    onResetDone = {},
+                    placeholderRequest = null,
+                    bottomInset = videoBarBottomInset,
+                    chromeProgress = chromeProgress,
+                    chromeExitPx = chromeExitPx,
+                    onTap = onTap,
+                )
+            } else {
+                ZoomablePhoto(
+                    photo = photo,
+                    enabled = true,
+                    resetTick = 0,
+                    onResetDone = {},
+                    placeholderRequest = placeholder,
+                    onTap = onTap,
+                    doubleTapZoom = true,
                 )
             }
             Text(
                 formatTaken(photo.dateTaken),
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(12.dp)
+                    // 固定在状态栏 + 标题栏（返回按钮 ~54dp）下方；用进入页面时捕获的状态栏
+                    // 高度，状态栏隐藏时时间戳不会跟着跳到屏幕顶端。
+                    .padding(start = 12.dp, top = statusBarTop + 64.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(dc.white.copy(alpha = 0.85f))
+                    .background(Color.Black.copy(alpha = 0.45f))
                     .padding(horizontal = 8.dp, vertical = 4.dp),
                 style = MaterialTheme.typography.bodySmall,
-                color = dc.ink
+                color = Color.White
             )
         }
-        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        // Flying-out photo on top (rendered last = topmost), so it visibly slides off over the
+        // already-revealed next photo.
+        val flying = flyingPhoto
+        if (flying != null) {
+            VideoAwareImage(
+                flying,
+                Modifier.fillMaxSize().graphicsLayer {
+                    translationX = flyingX
+                    translationY = flyingY
+                    rotationZ = (flyingX / 35f).coerceIn(-25f, 25f)
+                }.background(Color.Black),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        // ── 浮动底部按钮（单击照片可随标题一起隐藏）──
+        Row(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .graphicsLayer { translationY = chromeProgress * chromeExitPx },
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
             // 上一张: outline / secondary
             OutlinedButton(
                 onClick = onUndo,
                 enabled = session.position > 0,
                 shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = dc.labelGray),
-                border = BorderStroke(1.dp, dc.track)
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White.copy(alpha = 0.9f)),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.5f))
             ) { Text("上一张") }
             // 删除: tonal / danger — low-saturation red container, soft red content
             FilledTonalButton(
@@ -1477,7 +1529,14 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                 if (target == null) {
                     // ── Grid branch ──
                     val radius = photoBranchRadius(gridCornerRadius = 12.dp, gridSide = true)
-                    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp)) {
+                    val statusBarTop = rememberStatusBarTop()
+                    Column(
+                        Modifier
+                            .fillMaxSize()
+                            .padding(top = statusBarTop)
+                            .navigationBarsPadding()
+                            .padding(horizontal = 20.dp)
+                    ) {
                         Spacer(Modifier.height(10.dp))
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = onBack) { Icon(Icons.Default.Close, "返回") }
@@ -1548,6 +1607,9 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                         animatedVisibilityScope = this@AnimatedContent,
                         swipeDownToClose = true,
                         sourceThumbSize = gridThumbSize,
+                        fullScreenPhotoArea = true,
+                        tapToToggleChrome = true,
+                        doubleTapToZoom = true,
                         onClose = { current ->
                             scope.launch {
                                 closedMediaId = current.mediaId

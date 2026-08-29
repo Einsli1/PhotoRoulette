@@ -32,13 +32,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -123,13 +124,17 @@ fun VideoBadge(photo: PhotoEntity, modifier: Modifier = Modifier, centerSize: Dp
 
 /**
  * Full-screen video playback for the preview: VideoView (zero new dependencies) framed by the
- * video's first-frame thumbnail until the video is prepared. Tap toggles play/pause; a bottom
- * control bar offers play/pause, a seek slider and time labels.
+ * video's first-frame thumbnail until the video is prepared. A floating control bar (rounded
+ * pill) offers play/pause, a seek slider and time labels.
  *
  * [active] is false for pager pages that are off-screen — the video pauses so it never keeps
  * playing in the background. [resetTick] mirrors ZoomablePhoto's contract: bumping it (the
  * preview is closing) pauses the video and immediately calls [onResetDone], so the shared
  * element can return without waiting on a playing video.
+ *
+ * 全屏模式下：点击屏幕**不**切换播放/暂停，而是由 [onTap] 回调（图片同款：隐藏/显示标题、
+ * 按钮和本进度条）；播放/暂停交给控制条里的按钮。控制条通过 [bottomInset] 悬浮在底部按钮
+ * 上方，并随 [chromeProgress] 与标题/按钮一起飞出/飞回。
  */
 @Composable
 fun VideoPhoto(
@@ -139,6 +144,14 @@ fun VideoPhoto(
     resetTick: Int = 0,
     onResetDone: () -> Unit = {},
     placeholderRequest: ImageRequest? = null,
+    /** 控制条离屏幕底部的悬浮高度（全屏模式下=底部按钮行高+间距；0=贴底）。 */
+    bottomInset: Dp = 0.dp,
+    /** 0=显示，1=隐藏（与标题/按钮的 chromeProgress 同步）。 */
+    chromeProgress: Float = 0f,
+    /** 隐藏时控制条向下飞出的距离（与按钮一致）。 */
+    chromeExitPx: Float = 0f,
+    /** 非空：点击屏幕调用它（隐藏/显示 chrome）；null：点击屏幕切换播放/暂停（整理页预览）。 */
+    onTap: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var videoView by remember { mutableStateOf<VideoView?>(null) }
@@ -241,20 +254,27 @@ fun VideoPhoto(
             factory = { ctx -> VideoView(ctx).apply { videoView = this } },
             modifier = Modifier.fillMaxSize(),
         )
-        // Tap layer: toggles play/pause. Taps only — vertical drags still reach the
-        // swipe-down-to-close gesture and horizontal drags reach the pager.
+        // Tap layer: 全屏模式下隐藏/显示 chrome（与图片一致）；整理页预览保持播放/暂停。
+        // Taps only — vertical drags still reach the swipe-down-to-close gesture and horizontal
+        // drags reach the pager.
+        val currentOnTap by rememberUpdatedState(onTap)
         Box(
             Modifier
                 .fillMaxSize()
                 .pointerInput(photo.mediaId) {
                     detectTapGestures(onTap = {
-                        val vv = videoView ?: return@detectTapGestures
-                        if (vv.isPlaying) {
-                            vv.pause()
-                            isPlaying = false
+                        val cb = currentOnTap
+                        if (cb != null) {
+                            cb()
                         } else {
-                            vv.start()
-                            isPlaying = true
+                            val vv = videoView ?: return@detectTapGestures
+                            if (vv.isPlaying) {
+                                vv.pause()
+                                isPlaying = false
+                            } else {
+                                vv.start()
+                                isPlaying = true
+                            }
                         }
                     })
                 }
@@ -264,8 +284,12 @@ fun VideoPhoto(
                 Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f))))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 12.dp)
+                    .padding(bottom = bottomInset)
+                    .graphicsLayer { translationY = chromeProgress * chromeExitPx }
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {

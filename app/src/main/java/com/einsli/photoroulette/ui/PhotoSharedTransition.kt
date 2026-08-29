@@ -1,5 +1,6 @@
 package com.einsli.photoroulette.ui
 
+import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.BoundsTransform
@@ -19,10 +20,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -34,6 +40,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -245,8 +253,13 @@ internal fun AnimatedVisibilityScope.photoBranchRadius(
  * only swaps the key without retriggering a transition and closing returns the photo that is
  * actually on screen back to its own grid cell). The black background, the header and the
  * optional bottom controls are plain content of the branch and fade with the branch transition.
- * The photo area sits between the header and the controls so long photos never extend under the
- * buttons.
+ *
+ * Two layouts: by default (整理页) the photo area sits between the header and the controls so
+ * long photos never extend under the buttons. With [fullScreenPhotoArea] (回收站/回忆时光机)
+ * the photo fills the ENTIRE screen (including under the system bars) and the header/buttons
+ * float on top of it. In that mode [tapToToggleChrome] lets a single tap on a photo hide/show
+ * the header and buttons, and [doubleTapToZoom] makes a double tap zoom 1x↔3x (only zooms back
+ * out when already zoomed in).
  *
  * Closing first snaps any pinch-zoom back to 1x, then invokes [onClose] with the current photo
  * so the caller can make its grid cell visible before the shared element returns.
@@ -268,6 +281,12 @@ fun SharedTransitionScope.SharedPhotoPreview(
     bottomControls: (@Composable (current: PhotoEntity) -> Unit)? = null,
     sourceContentScale: ContentScale = ContentScale.Crop,
     sourceThumbSize: CoilSize? = null,
+    /** 照片铺满整块屏幕（含系统栏之下），标题和按钮浮在照片上层（回收站/回忆时光机）。 */
+    fullScreenPhotoArea: Boolean = false,
+    /** 单击照片（仅照片，非视频）隐藏/显示标题和按钮。 */
+    tapToToggleChrome: Boolean = false,
+    /** 双击照片在 1x ↔ 3x 间缩放；仅在已放大时允许缩小回 1x。 */
+    doubleTapToZoom: Boolean = false,
 ) {
     // Capture the list for this preview session: an in-preview restore/delete (which changes the
     // page's list) never yanks the pager out from under the exit animation.
@@ -297,6 +316,8 @@ fun SharedTransitionScope.SharedPhotoPreview(
     var closePending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+    // 状态栏高度在进入预览时固定捕获：状态栏隐藏时 chrome/时间戳不会跳位。
+    val statusBarTop = rememberStatusBarTop()
     val dismissThreshold = with(density) { 96.dp.toPx() }
     val effectiveDrag = maxOf(dragY, releasedDragY)
     // The dark→bright reveal is deliberately SLOWER than the photo: the page behind reaches full
@@ -305,15 +326,28 @@ fun SharedTransitionScope.SharedPhotoPreview(
     val revealProgress =
         if (swipeDownToClose && revealContent != null) (effectiveDrag / revealDistance).coerceIn(0f, 1f) else 0f
     val scrimAlpha = 1f - revealProgress
+    // 单击照片隐藏/显示标题与按钮（仅照片，非视频；视频点击仍是播放/暂停）。
+    var chromeHidden by remember { mutableStateOf(false) }
     // Title / buttons are NOT tied to the photo's drag distance: any downward drag (>0px) flies
     // them out of the screen immediately; they fly back as soon as the photo returns to rest.
-    val chromeOut = (dragY > 0f) || closePending
+    // 单击隐藏时同样飞出屏幕，再单击飞回。
+    val chromeOut = (dragY > 0f) || closePending || (tapToToggleChrome && chromeHidden)
     val chromeProgress by animateFloatAsState(
         targetValue = if (chromeOut) 1f else 0f,
-        animationSpec = tween(300, easing = FastOutSlowInEasing),
+        animationSpec = tween(250, easing = FastOutSlowInEasing),
         label = "chromeExit",
     )
     val chromeExitPx = with(density) { 140.dp.toPx() }
+    // 状态栏只跟随「单击隐藏」：拖拽/关闭时不藏状态栏，避免返回宫格时 insets 变化导致页面跳位（闪一下）。
+    if (fullScreenPhotoArea) SyncStatusBarWithChrome(tapToToggleChrome && chromeHidden)
+    // 全屏模式下视频控制条悬浮在底部按钮上方（回收站有按钮：按钮行高~72dp + 间距12dp；
+    // 回忆时光机没有按钮：只让出导航栏+16dp）。整理页预览不悬浮。
+    val videoBarBottomInset: Dp = if (fullScreenPhotoArea) {
+        val aboveBottom = if (bottomControls != null) 84.dp else 16.dp
+        with(density) {
+            (WindowInsets.navigationBars.getBottom(density) + aboveBottom.toPx()).toDp()
+        }
+    } else 0.dp
 
     fun requestClose() {
         if (closePending) return
@@ -345,12 +379,121 @@ fun SharedTransitionScope.SharedPhotoPreview(
                 }
         )
         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = scrimAlpha)))
-        Column(Modifier.fillMaxSize().systemBarsPadding()) {
+
+        // ── 照片区域（shared element）──
+        // Layout-level offset (not graphicsLayer): the shared-element flight reads LAYOUT
+        // bounds, so starting from the dragged position requires the drag to move the layout —
+        // otherwise the return flight snaps to center first.
+        val dragOffset = Modifier.offset { IntOffset(0, dragY.roundToInt()) }
+        val swipeDownModifier: Modifier =
+            if (swipeDownToClose) {
+                Modifier.pointerInput(Unit) {
+                    detectVerticalDragGestures(
+                        onDragStart = { releasedDragY = 0f },
+                        onVerticalDrag = { change, amount ->
+                            // Downward drags pull the photo down; upward ones snap back.
+                            if (amount > 0f || dragY > 0f) {
+                                dragY += amount
+                                change.consume()
+                            }
+                        },
+                        onDragEnd = {
+                            if (dragY > dismissThreshold) {
+                                // Start the return immediately FROM the released position:
+                                // requestClose() kicks off the shared-element flight back to the
+                                // grid cell while dragY animates to 0 over the same duration and
+                                // easing, so the photo keeps moving from where it was released
+                                // instead of snapping back to center first. Pin the photo where it
+                                // was released: the flight takes over from the released position
+                                // (the offset moves the layout, so the shared-element start bounds
+                                // include it). No dragY spring-back here — it would fight the flight.
+                                releasedDragY = dragY
+                                requestClose()
+                            } else {
+                                scope.launch {
+                                    val start = dragY
+                                    animate(0f, 1f, animationSpec = tween(220, easing = FastOutSlowInEasing)) { p, _ ->
+                                        dragY = start * (1f - p)
+                                    }
+                                }
+                            }
+                        },
+                        onDragCancel = { dragY = 0f; releasedDragY = 0f },
+                    )
+                }
+            } else {
+                Modifier
+            }
+        val sharedModifier: Modifier = Modifier
+            .sharedElement(
+                state,
+                animatedVisibilityScope,
+                boundsTransform = PhotoBoundsTransform,
+            )
+            .clip(RoundedCornerShape(animatedRadius))
+
+        // Copy of the current photo in the source scale (Crop for the grids, Fit for the review
+        // card): matches the cell/card at the start of the open transition, then fades out as the
+        // photo expands to full-screen. Only composed while the open transition runs, so the
+        // resting preview does not waste a full-screen decode.
+        val photoContent: @Composable () -> Unit = {
+            if (morph < 1f) {
+                // Same request key as the source cell/card thumbnail (data + size + frame param),
+                // so this copy is an instant cache hit and the open transition starts from the
+                // already-loaded thumbnail instead of a blank area.
+                val copyRequest = remember(currentPhoto.uri, sourceThumbSize) {
+                    photoThumbRequest(context, currentPhoto, sourceThumbSize)
+                }
+                AsyncImage(
+                    copyRequest,
+                    currentPhoto.displayName,
+                    Modifier.fillMaxSize().alpha(1f - morph),
+                    contentScale = sourceContentScale,
+                )
+            }
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize().alpha(morph),
+            ) { page ->
+                val p = openPhotos[page]
+                // The preview's placeholder is the source cell/card thumbnail (same key as the
+                // grid side), so the first open shows it instantly while the full-screen copy
+                // decodes in the background.
+                val placeholder = remember(p.mediaId, sourceThumbSize) {
+                    sourceThumbSize?.let { photoThumbRequest(context, p, it) }
+                }
+                if (p.mimeType.startsWith("video/")) {
+                    VideoPhoto(
+                        photo = p,
+                        active = pagerState.currentPage == page,
+                        resetTick = zoomResetTick,
+                        onResetDone = { if (closePending) onClose(currentPhoto) },
+                        placeholderRequest = placeholder,
+                        bottomInset = videoBarBottomInset,
+                        chromeProgress = chromeProgress,
+                        chromeExitPx = chromeExitPx,
+                        onTap = if (tapToToggleChrome) ({ chromeHidden = !chromeHidden }) else null,
+                    )
+                } else {
+                    ZoomablePhoto(
+                        photo = p,
+                        enabled = !transitionActive,
+                        resetTick = zoomResetTick,
+                        onResetDone = { if (closePending) onClose(currentPhoto) },
+                        placeholderRequest = placeholder,
+                        onTap = { if (tapToToggleChrome) chromeHidden = !chromeHidden },
+                        doubleTapZoom = doubleTapToZoom,
+                    )
+                }
+            }
+        }
+
+        // ── 标题区（关闭 / 文件名 / 页码）──
+        val headerRow: @Composable () -> Unit = {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-                    .graphicsLayer { translationY = -chromeProgress * chromeExitPx },
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -373,121 +516,111 @@ fun SharedTransitionScope.SharedPhotoPreview(
                     modifier = Modifier.padding(end = 8.dp),
                 )
             }
-            // Photo area — the shared element (only the photo). Between the header and the
-            // controls so long photos never extend under the buttons. On swipe-down dismiss the
-            // photo slides down while the header slides up and the controls slide down (both
-            // driven by effectiveDrag); the controls are drawn after (on top), so the sliding
-            // photo passes UNDER them and never blocks the buttons.
+        }
+
+        if (fullScreenPhotoArea) {
+            // ── 全屏照片分支（回收站 / 回忆时光机）──
+            // 照片铺满整块屏幕（含状态栏/导航栏之下）；标题和按钮浮在照片上层，拖动退出时
+            // 照片下滑、标题上滑、按钮下滑（不加渐变底，避免在照片上出现阴影）。
             Box(
                 Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    // Layout-level offset (not graphicsLayer): the shared-element flight reads
-                    // LAYOUT bounds, so starting from the dragged position requires the drag to
-                    // move the layout — otherwise the return flight snaps to center first.
-                    .offset { IntOffset(0, dragY.roundToInt()) }
-                    .then(
-                        if (swipeDownToClose) {
-                            Modifier.pointerInput(Unit) {
-                                detectVerticalDragGestures(
-                                    onDragStart = { releasedDragY = 0f },
-                                    onVerticalDrag = { change, amount ->
-                                        // Downward drags pull the photo down; upward ones snap back.
-                                        if (amount > 0f || dragY > 0f) {
-                                            dragY += amount
-                                            change.consume()
-                                        }
-                                    },
-                                    onDragEnd = {
-                                        if (dragY > dismissThreshold) {
-                                            // Start the return immediately FROM the released
-                                            // position: requestClose() kicks off the shared-
-                                            // element flight back to the grid cell while dragY
-                                            // animates to 0 over the same duration and easing, so
-                                            // the photo keeps moving from where it was released
-                                            // instead of snapping back to center first.
-                                            // Pin the photo where it was released: the flight takes
-                                            // over from the released position (the offset moves the
-                                            // layout, so the shared-element start bounds include it).
-                                            // No dragY spring-back here — it would fight the flight.
-                                            releasedDragY = dragY
-                                            requestClose()
-                                        } else {
-                                            scope.launch {
-                                                val start = dragY
-                                                animate(0f, 1f, animationSpec = tween(220, easing = FastOutSlowInEasing)) { p, _ ->
-                                                    dragY = start * (1f - p)
-                                                }
-                                            }
-                                        }
-                                    },
-                                    onDragCancel = { dragY = 0f; releasedDragY = 0f },
-                                )
-                            }
-                        } else {
-                            Modifier
-                        }
-                    )
-                    .sharedElement(
-                        state,
-                        animatedVisibilityScope,
-                        boundsTransform = PhotoBoundsTransform,
-                    )
-                    .clip(RoundedCornerShape(animatedRadius))
+                    .fillMaxSize()
+                    .then(dragOffset)
+                    .then(swipeDownModifier)
+                    .then(sharedModifier)
             ) {
-                // Copy of the current photo in the source scale (Crop for the grids, Fit for the
-                // review card): matches the cell/card at the start of the open transition, then
-                // fades out as the photo expands to full-screen. Only composed while the open
-                // transition runs, so the resting preview does not waste a full-screen decode.
-                if (morph < 1f) {
-                    // Same request key as the source cell/card thumbnail (data + size + frame
-                    // param), so this copy is an instant cache hit and the open transition starts
-                    // from the already-loaded thumbnail instead of a blank area.
-                    val copyRequest = remember(currentPhoto.uri, sourceThumbSize) {
-                        photoThumbRequest(context, currentPhoto, sourceThumbSize)
-                    }
-                    AsyncImage(
-                        copyRequest,
-                        currentPhoto.displayName,
-                        Modifier.fillMaxSize().alpha(1f - morph),
-                        contentScale = sourceContentScale,
-                    )
+                photoContent()
+            }
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(top = statusBarTop)
+                    .navigationBarsPadding()
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer { translationY = -chromeProgress * chromeExitPx }
+                ) {
+                    headerRow()
                 }
-                HorizontalPager(
-                    state = pagerState,
-                    modifier = Modifier.fillMaxSize().alpha(morph),
-                ) { page ->
-                    val p = openPhotos[page]
-                    // The preview's placeholder is the source cell/card thumbnail (same key as
-                    // the grid side), so the first open shows it instantly while the full-screen
-                    // copy decodes in the background.
-                    val placeholder = remember(p.mediaId, sourceThumbSize) {
-                        sourceThumbSize?.let { photoThumbRequest(context, p, it) }
-                    }
-                    if (p.mimeType.startsWith("video/")) {
-                        VideoPhoto(
-                            photo = p,
-                            active = pagerState.currentPage == page,
-                            resetTick = zoomResetTick,
-                            onResetDone = { if (closePending) onClose(currentPhoto) },
-                            placeholderRequest = placeholder,
-                        )
-                    } else {
-                        ZoomablePhoto(
-                            photo = p,
-                            enabled = !transitionActive,
-                            resetTick = zoomResetTick,
-                            onResetDone = { if (closePending) onClose(currentPhoto) },
-                            placeholderRequest = placeholder,
-                        )
+                Spacer(Modifier.weight(1f))
+                bottomControls?.let { controls ->
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .graphicsLayer { translationY = chromeProgress * chromeExitPx }
+                    ) {
+                        controls(currentPhoto)
                     }
                 }
             }
-            bottomControls?.let { controls ->
-                Box(Modifier.graphicsLayer { translationY = chromeProgress * chromeExitPx }) {
-                    controls(currentPhoto)
+        } else {
+            // ── 常规分支（整理页）──
+            // Photo area between the header and the controls so long photos never extend under
+            // the buttons. On swipe-down dismiss the photo slides down while the header slides up
+            // and the controls slide down (both driven by effectiveDrag); the controls are drawn
+            // after (on top), so the sliding photo passes UNDER them and never blocks the buttons.
+            Column(Modifier.fillMaxSize().systemBarsPadding()) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer { translationY = -chromeProgress * chromeExitPx }
+                ) {
+                    headerRow()
+                }
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .then(dragOffset)
+                        .then(swipeDownModifier)
+                        .then(sharedModifier)
+                ) {
+                    photoContent()
+                }
+                bottomControls?.let { controls ->
+                    Box(Modifier.graphicsLayer { translationY = chromeProgress * chromeExitPx }) {
+                        controls(currentPhoto)
+                    }
                 }
             }
         }
     }
+}
+
+/**
+ * 让系统状态栏跟随全屏预览的 chrome 一起隐藏/显示：单击照片隐藏标题/按钮时状态栏一并收起，
+ * 再单击（或关闭预览/离开页面）时恢复。组合销毁时强制恢复，避免状态栏卡在隐藏状态。
+ * （系统状态栏的收起动画由系统控制，Android 公开 API 无法关闭，这里只保证时机同步。）
+ */
+@Composable
+internal fun SyncStatusBarWithChrome(hidden: Boolean) {
+    val activity = LocalContext.current as? Activity
+    LaunchedEffect(hidden) {
+        val window = activity?.window ?: return@LaunchedEffect
+        val controller = window.insetsController ?: return@LaunchedEffect
+        if (hidden) {
+            controller.hide(android.view.WindowInsets.Type.statusBars())
+        } else {
+            controller.show(android.view.WindowInsets.Type.statusBars())
+        }
+    }
+    DisposableEffect(activity) {
+        onDispose {
+            val window = activity?.window ?: return@onDispose
+            window.insetsController?.show(android.view.WindowInsets.Type.statusBars())
+        }
+    }
+}
+
+/**
+ * 进入页面/预览时**固定捕获**的状态栏高度（dp）。用固定值做 padding 后，状态栏隐藏/显示不会
+ * 改变任何布局——返回宫格时页面不会因 insets 变化而跳位（闪一下）。不要用 systemBarsPadding()。
+ */
+@Composable
+internal fun rememberStatusBarTop(): Dp {
+    val density = LocalDensity.current
+    val insets = WindowInsets.statusBars
+    return remember { with(density) { insets.getTop(density).toDp() } }
 }
