@@ -354,6 +354,115 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     }
 }
 
+/** Whole-page mirror of the RecycleBin, rendered behind the preview's black scrim and revealed
+ *  on swipe-down. The layout mirrors the real page EXACTLY (same paddings / spacings / weights),
+ *  so the reveal and the exit crossfade align pixel-for-pixel with the real page; the grid uses
+ *  the same cell thumbnails and the caller keeps its scroll in sync. Not interactive. */
+@Composable
+private fun TrashPageBackdrop(
+    items: List<PhotoEntity>,
+    selected: Set<Long>,
+    state: LazyGridState,
+    thumbSize: CoilSize,
+) {
+    val allIds = items.map { it.mediaId }.toSet()
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(12.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("回收站", style = MaterialTheme.typography.headlineMedium)
+            Button(onClick = {}) { Text("返回") }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {}) { Text(if (selected.size != allIds.size) "全选" else "取消全选") }
+            Button(onClick = {}) { Text("移出回收站") }
+            Button(onClick = {}) { Text("批量删除") }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text("长按选中，点击预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(8.dp))
+        LazyVerticalGrid(
+            state = state,
+            columns = GridCells.Fixed(3),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            userScrollEnabled = false,
+        ) {
+            itemsIndexed(items) { _, photo ->
+                val checked = selected.contains(photo.mediaId)
+                Box(
+                    Modifier
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    VideoAwareImage(photo, Modifier.fillMaxSize(), thumbSize = thumbSize)
+                    VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
+                    if (checked) {
+                        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = "已选中",
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(6.dp)
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary)
+                                .padding(3.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Whole-page mirror of the MemoryViewer (回忆时光机), same role as [TrashPageBackdrop]. */
+@Composable
+private fun MemoryPageBackdrop(
+    memory: MemoryInfo?,
+    photos: List<PhotoEntity>,
+    state: LazyGridState,
+    thumbSize: CoilSize,
+    dc: DesignColors,
+) {
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp)) {
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = {}) { Icon(Icons.Default.Close, "返回") }
+            Column(Modifier.weight(1f)) {
+                Text("回忆时光机", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+                if (memory != null) {
+                    Text("${memory.yearsAgo}年前的今天 · ${memory.dateText} · ${memory.count} 张照片", fontSize = 12.sp, color = dc.slate)
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        LazyVerticalGrid(
+            state = state,
+            columns = GridCells.Fixed(3),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            userScrollEnabled = false,
+        ) {
+            itemsIndexed(photos) { _, photo ->
+                Box(
+                    Modifier
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(dc.white)
+                ) {
+                    VideoAwareImage(photo, Modifier.fillMaxSize(), thumbSize = thumbSize)
+                    VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable private fun RecycleBin(items: List<PhotoEntity>, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -364,6 +473,12 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     // BackHandler (composed later) wins and closes the preview first.
     BackHandler(onBack = onBack)
     val gridState = rememberLazyGridState()
+    // Scroll state for the preview's whole-page backdrop mirror (TrashPageBackdrop), seeded
+    // with the real grid's scroll when a preview opens and scrolled in sync when it closes.
+    val backdropState = rememberLazyGridState()
+    // The photo being closed: only ITS grid cell renders the full-screen Fit copy on re-entry
+    // (the flight target); the other cells fade in Crop thumbnails (avoids a first-frame stall).
+    var closedMediaId by remember { mutableLongStateOf(-1L) }
     // Cell-sized decode target for grid thumbnails: 3 columns, so ~screenWidth/3 px. Fixing the
     // request size keeps every cell's memory-cache entry identical and small, so fast scrolling
     // re-shows already-loaded photos instantly instead of re-decoding.
@@ -470,56 +585,59 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                 }
                             },
                         ) {
-                        if (items.isEmpty()) {
-                            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("回收站为空") }
-                        } else {
-                            LazyVerticalGrid(
-                                state = gridState,
-                                columns = GridCells.Fixed(3),
-                                modifier = Modifier.fillMaxSize(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
-                                flingBehavior = rememberGentleFlingBehavior()
-                            ) {
-                                itemsIndexed(items) { index, photo ->
-                                    val checked = selected.contains(photo.mediaId)
-                                    // Live copy of `checked`: pointerInput does NOT restart when
-                                    // selection changes, so the long-press handler must read the
-                                    // latest value through a live state.
-                                    val liveChecked by rememberUpdatedState(checked)
-                                    Box(
-                                        Modifier
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                                            .pointerInput(photo.mediaId) {
-                                                detectTapGestures(
-                                                    onTap = { previewIndex = index },
-                                                    onLongPress = { selected = if (liveChecked) selected - photo.mediaId else selected + photo.mediaId }
+                            if (items.isEmpty()) {
+                                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("回收站为空") }
+                            } else {
+                                LazyVerticalGrid(
+                                    state = gridState,
+                                    columns = GridCells.Fixed(3),
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    flingBehavior = rememberGentleFlingBehavior()
+                                ) {
+                                    itemsIndexed(items) { index, photo ->
+                                        val checked = selected.contains(photo.mediaId)
+                                        // Live copy of `checked`: pointerInput does NOT restart when
+                                        // selection changes, so the long-press handler must read the
+                                        // latest value through a live state.
+                                        val liveChecked by rememberUpdatedState(checked)
+                                        Box(
+                                            Modifier
+                                                .aspectRatio(1f)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                                .pointerInput(photo.mediaId) {
+                                                    detectTapGestures(
+                                                        onTap = {
+                                                            backdropState.requestScrollToItem(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset)
+                                                            previewIndex = index
+                                                        },
+                                                        onLongPress = { selected = if (liveChecked) selected - photo.mediaId else selected + photo.mediaId }
+                                                    )
+                                                }
+                                        ) {
+                                            SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize, fitOnEnter = photo.mediaId == closedMediaId)
+                                            VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
+                                            if (checked) {
+                                                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
+                                                Icon(
+                                                    Icons.Default.Check,
+                                                    contentDescription = "已选中",
+                                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                                    modifier = Modifier
+                                                        .align(Alignment.TopEnd)
+                                                        .padding(6.dp)
+                                                        .size(24.dp)
+                                                        .clip(CircleShape)
+                                                        .background(MaterialTheme.colorScheme.primary)
+                                                        .padding(3.dp)
                                                 )
                                             }
-                                    ) {
-                                        SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize)
-                                        VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
-                                        if (checked) {
-                                            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
-                                            Icon(
-                                                Icons.Default.Check,
-                                                contentDescription = "已选中",
-                                                tint = MaterialTheme.colorScheme.onPrimary,
-                                                modifier = Modifier
-                                                    .align(Alignment.TopEnd)
-                                                    .padding(6.dp)
-                                                    .size(24.dp)
-                                                    .clip(CircleShape)
-                                                    .background(MaterialTheme.colorScheme.primary)
-                                                    .padding(3.dp)
-                                            )
                                         }
                                     }
                                 }
                             }
-                        }
                         }
                     }
                 } else {
@@ -533,12 +651,26 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                         sourceThumbSize = gridThumbSize,
                         onClose = { current ->
                             scope.launch {
+                                closedMediaId = current.mediaId
                                 val idx = items.indexOfFirst { it.mediaId == current.mediaId }
                                 // Scroll the grid BEFORE closing so the returning photo's cell is
                                 // already in view (and composed) when the return transition starts.
-                                if (idx >= 0) revealGridItemIfOffscreen(gridState, idx)
+                                // The backdrop mirror scrolls in sync so the exit crossfade swaps
+                                // two identical pages instead of jumping.
+                                if (idx >= 0) {
+                                    revealGridItemIfOffscreen(gridState, idx)
+                                    revealGridItemIfOffscreen(backdropState, idx)
+                                }
                                 previewIndex = -1
                             }
+                        },
+                        revealContent = {
+                            TrashPageBackdrop(
+                                items = items,
+                                selected = selected,
+                                state = backdropState,
+                                thumbSize = gridThumbSize,
+                            )
                         },
                         bottomControls = { current ->
                             Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1297,6 +1429,10 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     // preview is open, SharedPhotoPreview's own BackHandler (composed later) closes it first.
     BackHandler(onBack = onBack)
     val gridState = rememberLazyGridState()
+    // Scroll state for the preview's whole-page backdrop mirror (MemoryPageBackdrop).
+    val backdropState = rememberLazyGridState()
+    // The photo being closed: only its cell renders the Fit copy on re-entry (see RecycleBin).
+    var closedMediaId by remember { mutableLongStateOf(-1L) }
     // Preload memory-grid thumbnails aggressively (first batch on entry, then a window around
     // the visible range) — same trick as RecycleBin, so fast flings rarely show placeholders.
     val preloadContext = LocalContext.current
@@ -1359,45 +1495,48 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                         SpringPullBox(
                             modifier = Modifier.weight(1f).fillMaxWidth().clipToBounds(),
                             pullAtTop = { (gridState.firstVisibleItemIndex * gridRowPx + gridState.firstVisibleItemScrollOffset).toFloat().coerceAtLeast(0f) },
-                        pullAtBottom = {
-                            val info = gridState.layoutInfo
-                            val last = info.visibleItemsInfo.lastOrNull()
-                            if (last == null || last.index < info.totalItemsCount - 1) {
-                                // More content below the viewport: still scrollable, no bottom pull.
-                                Float.MAX_VALUE
+                            pullAtBottom = {
+                                val info = gridState.layoutInfo
+                                val last = info.visibleItemsInfo.lastOrNull()
+                                if (last == null || last.index < info.totalItemsCount - 1) {
+                                    // More content below the viewport: still scrollable, no bottom pull.
+                                    Float.MAX_VALUE
+                                } else {
+                                    val contentEnd = (last.offset.y + last.size.height + info.afterContentPadding).toFloat()
+                                    (contentEnd - info.viewportEndOffset.toFloat()).coerceAtLeast(0f)
+                                }
+                            },
+                        ) {
+                            if (photos.isEmpty()) {
+                                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                                    Text("暂无回忆", color = dc.slate)
+                                }
                             } else {
-                                val contentEnd = (last.offset.y + last.size.height + info.afterContentPadding).toFloat()
-                                (contentEnd - info.viewportEndOffset.toFloat()).coerceAtLeast(0f)
-                            }
-                        },
-                    ) {
-                        if (photos.isEmpty()) {
-                            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                                Text("暂无回忆", color = dc.slate)
-                            }
-                        } else {
-                            LazyVerticalGrid(
-                                state = gridState,
-                                columns = GridCells.Fixed(3),
-                                modifier = Modifier.fillMaxSize(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                                flingBehavior = rememberGentleFlingBehavior()
-                            ) {
-                                itemsIndexed(photos) { index, photo ->
-                                    Box(
-                                        Modifier
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(dc.white)
-                                            .clickable { previewIndex = index }
-                                    ) {
-                                        SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize)
-                                        VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
+                                LazyVerticalGrid(
+                                    state = gridState,
+                                    columns = GridCells.Fixed(3),
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    flingBehavior = rememberGentleFlingBehavior()
+                                ) {
+                                    itemsIndexed(photos) { index, photo ->
+                                        Box(
+                                            Modifier
+                                                .aspectRatio(1f)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(dc.white)
+                                                .clickable {
+                                                    backdropState.requestScrollToItem(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset)
+                                                    previewIndex = index
+                                                }
+                                        ) {
+                                            SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize, fitOnEnter = photo.mediaId == closedMediaId)
+                                            VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
+                                        }
                                     }
                                 }
                             }
-                        }
                         }
                     }
                 } else {
@@ -1407,15 +1546,29 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                         initialIndex = target,
                         animatedRadius = photoBranchRadius(gridCornerRadius = 12.dp, gridSide = false),
                         animatedVisibilityScope = this@AnimatedContent,
+                        swipeDownToClose = true,
                         sourceThumbSize = gridThumbSize,
                         onClose = { current ->
                             scope.launch {
+                                closedMediaId = current.mediaId
                                 val idx = photos.indexOfFirst { it.mediaId == current.mediaId }
                                 // Scroll the grid BEFORE closing so the returning photo's cell is
                                 // already in view (and composed) when the return transition starts.
-                                if (idx >= 0) revealGridItemIfOffscreen(gridState, idx)
+                                if (idx >= 0) {
+                                    revealGridItemIfOffscreen(gridState, idx)
+                                    revealGridItemIfOffscreen(backdropState, idx)
+                                }
                                 previewIndex = -1
                             }
+                        },
+                        revealContent = {
+                            MemoryPageBackdrop(
+                                memory = memory,
+                                photos = photos,
+                                state = backdropState,
+                                thumbSize = gridThumbSize,
+                                dc = dc,
+                            )
                         },
                     )
                 }

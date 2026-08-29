@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
@@ -54,6 +55,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.compose.rememberAsyncImagePainter
@@ -138,6 +140,14 @@ fun SharedTransitionScope.SharedGridImage(
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
     gridSize: CoilSize? = null,
+    /** When the caller keeps the grid always composed (RecycleBin / MemoryViewer, where the page
+     *  is revealed behind the preview), it passes its own Fit→Crop morph here so the return
+     *  flight still starts Fit. Null keeps the branch-transition-driven morph. */
+    morphOverride: Float? = null,
+    /** Only the cell the closed photo is flying back to needs the full-screen Fit copy while the
+     *  branch enters; the other cells just fade in their Crop thumbnails. Rendering a screen-size
+     *  AsyncImage for EVERY visible cell made the return's first frame stall (~100ms). */
+    fitOnEnter: Boolean = true,
 ) {
     val state = rememberSharedContentState(photoSharedKey(photo.mediaId))
     val context = LocalContext.current
@@ -146,10 +156,15 @@ fun SharedTransitionScope.SharedGridImage(
     // shared-element bounds animation. The shared element is the ONLY thing rendered during the
     // transition and it animates from the preview's full-screen bounds down to this cell, so it
     // must render Fit at the start (to match the preview) and Crop at the end (to match the cell).
-    val morph by animatedVisibilityScope.transition.animateFloat(
+    val transitionMorph by animatedVisibilityScope.transition.animateFloat(
         transitionSpec = { tween(PhotoTransitionMillis, easing = FastOutSlowInEasing) },
         label = "gridMorph",
     ) { s -> if (s == EnterExitState.Visible) 1f else 0f }
+    // Only the returning cell reads the transition (recomposing every frame); the other cells
+    // stay static at morph=1. Reading the delegated state is what subscribes a cell to the
+    // per-frame animation — without this gate every visible cell recomposed each flight frame
+    // (a 60ms+ frame budget on the trash grid).
+    val morph = if (fitOnEnter) (morphOverride ?: transitionMorph) else 1f
     // Resting thumbnail: fixed cell-size request (when [gridSize] is provided) so grid scrolling
     // decodes only the small bitmap and hits a stable memory-cache entry. Fades in on success.
     val thumbRequest = remember(photo.uri, gridSize) { photoThumbRequest(context, photo, gridSize) }
@@ -173,11 +188,11 @@ fun SharedTransitionScope.SharedGridImage(
             )
             .clip(RoundedCornerShape(animatedRadius))
     ) {
-        // Fit copy: only composed while the return transition runs (morph < 1). It uses the same
-        // fixed screen-size request as the preview, so it hits the preview's memory-cache entry
-        // immediately instead of re-decoding. At rest it is not composed, so fast grid scrolling
-        // only decodes the small Crop thumbnail below.
-        if (morph < 1f) {
+        // Fit copy: only composed for the returning cell while the return transition runs
+        // (morph < 1). It uses the same fixed screen-size request as the preview, so it hits the
+        // preview's memory-cache entry immediately instead of re-decoding. At rest it is not
+        // composed, so fast grid scrolling only decodes the small Crop thumbnail below.
+        if (morph < 1f && fitOnEnter) {
             AsyncImage(
                 model = remember(photo.uri, previewSize) {
                     ImageRequest.Builder(context).data(photo.uri).size(previewSize).apply {
@@ -246,6 +261,10 @@ fun SharedTransitionScope.SharedPhotoPreview(
     onClose: (PhotoEntity) -> Unit,
     modifier: Modifier = Modifier,
     swipeDownToClose: Boolean = false,
+    /** Whole-page backdrop drawn BEHIND the black scrim and revealed as the photo is dragged
+     *  down to dismiss (the caller passes a mirror of its page so the reveal shows the full
+     *  page — title, buttons and grid — brightening from dark). */
+    revealContent: (@Composable () -> Unit)? = null,
     bottomControls: (@Composable (current: PhotoEntity) -> Unit)? = null,
     sourceContentScale: ContentScale = ContentScale.Crop,
     sourceThumbSize: CoilSize? = null,
@@ -270,10 +289,31 @@ fun SharedTransitionScope.SharedPhotoPreview(
         label = "previewMorph",
     ) { s -> if (s == EnterExitState.Visible) 1f else 0f }
     var dragY by remember { mutableFloatStateOf(0f) }
+    // Pinned to the drag position when a dismiss is COMMITTED: the photo keeps flying via the
+    // shared transition while dragY springs back to 0, but the scrim must stay at the released
+    // position so the grid stays revealed for the whole exit.
+    var releasedDragY by remember { mutableFloatStateOf(0f) }
     var zoomResetTick by remember { mutableIntStateOf(0) }
     var closePending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val dismissThreshold = with(LocalDensity.current) { 160.dp.toPx() }
+    val density = LocalDensity.current
+    val dismissThreshold = with(density) { 96.dp.toPx() }
+    val effectiveDrag = maxOf(dragY, releasedDragY)
+    // The dark→bright reveal is deliberately SLOWER than the photo: the page behind reaches full
+    // brightness only after dragging ~2x the dismiss threshold, so it trails the photo.
+    val revealDistance = dismissThreshold * 2f
+    val revealProgress =
+        if (swipeDownToClose && revealContent != null) (effectiveDrag / revealDistance).coerceIn(0f, 1f) else 0f
+    val scrimAlpha = 1f - revealProgress
+    // Title / buttons are NOT tied to the photo's drag distance: any downward drag (>0px) flies
+    // them out of the screen immediately; they fly back as soon as the photo returns to rest.
+    val chromeOut = (dragY > 0f) || closePending
+    val chromeProgress by animateFloatAsState(
+        targetValue = if (chromeOut) 1f else 0f,
+        animationSpec = tween(300, easing = FastOutSlowInEasing),
+        label = "chromeExit",
+    )
+    val chromeExitPx = with(density) { 140.dp.toPx() }
 
     fun requestClose() {
         if (closePending) return
@@ -289,11 +329,28 @@ fun SharedTransitionScope.SharedPhotoPreview(
         modifier
             .fillMaxSize()
     ) {
-        // Black background (fades with the branch transition) — stays fixed on dismiss drags.
-        Box(Modifier.fillMaxSize().background(Color.Black))
+        // Whole-page backdrop (the caller's page mirror), then a touch-absorbing layer so the
+        // preview's transparent areas never reach the (real) page beneath, then the black scrim
+        // that fades out as the photo is dragged down — "the page behind brightens from dark".
+        revealContent?.invoke()
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent().changes.forEach { it.consume() }
+                        }
+                    }
+                }
+        )
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = scrimAlpha)))
         Column(Modifier.fillMaxSize().systemBarsPadding()) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                    .graphicsLayer { translationY = -chromeProgress * chromeExitPx },
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -317,19 +374,23 @@ fun SharedTransitionScope.SharedPhotoPreview(
                 )
             }
             // Photo area — the shared element (only the photo). Between the header and the
-            // controls so long photos never extend under the buttons. On swipe-down dismiss
-            // ONLY this slides down: the header and controls stay put, and because the controls
-            // are drawn after (on top), the sliding photo passes UNDER them and never blocks
-            // the buttons.
+            // controls so long photos never extend under the buttons. On swipe-down dismiss the
+            // photo slides down while the header slides up and the controls slide down (both
+            // driven by effectiveDrag); the controls are drawn after (on top), so the sliding
+            // photo passes UNDER them and never blocks the buttons.
             Box(
                 Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .graphicsLayer { translationY = dragY }
+                    // Layout-level offset (not graphicsLayer): the shared-element flight reads
+                    // LAYOUT bounds, so starting from the dragged position requires the drag to
+                    // move the layout — otherwise the return flight snaps to center first.
+                    .offset { IntOffset(0, dragY.roundToInt()) }
                     .then(
                         if (swipeDownToClose) {
                             Modifier.pointerInput(Unit) {
                                 detectVerticalDragGestures(
+                                    onDragStart = { releasedDragY = 0f },
                                     onVerticalDrag = { change, amount ->
                                         // Downward drags pull the photo down; upward ones snap back.
                                         if (amount > 0f || dragY > 0f) {
@@ -345,13 +406,12 @@ fun SharedTransitionScope.SharedPhotoPreview(
                                             // animates to 0 over the same duration and easing, so
                                             // the photo keeps moving from where it was released
                                             // instead of snapping back to center first.
+                                            // Pin the photo where it was released: the flight takes
+                                            // over from the released position (the offset moves the
+                                            // layout, so the shared-element start bounds include it).
+                                            // No dragY spring-back here — it would fight the flight.
+                                            releasedDragY = dragY
                                             requestClose()
-                                            scope.launch {
-                                                val start = dragY
-                                                animate(0f, 1f, animationSpec = tween(PhotoTransitionMillis, easing = FastOutSlowInEasing)) { p, _ ->
-                                                    dragY = start * (1f - p)
-                                                }
-                                            }
                                         } else {
                                             scope.launch {
                                                 val start = dragY
@@ -361,7 +421,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
                                             }
                                         }
                                     },
-                                    onDragCancel = { dragY = 0f },
+                                    onDragCancel = { dragY = 0f; releasedDragY = 0f },
                                 )
                             }
                         } else {
@@ -423,7 +483,11 @@ fun SharedTransitionScope.SharedPhotoPreview(
                     }
                 }
             }
-            bottomControls?.invoke(currentPhoto)
+            bottomControls?.let { controls ->
+                Box(Modifier.graphicsLayer { translationY = chromeProgress * chromeExitPx }) {
+                    controls(currentPhoto)
+                }
+            }
         }
     }
 }
