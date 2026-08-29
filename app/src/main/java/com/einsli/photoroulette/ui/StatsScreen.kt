@@ -7,9 +7,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -36,6 +39,8 @@ private fun formatBytes(b: Long): String {
     }
 }
 
+private fun formatCount(n: Int): String = String.format("%,d", n)
+
 private fun weekdayLabel(d: DayOfWeek): String = when (d) {
     DayOfWeek.MONDAY -> "周一"; DayOfWeek.TUESDAY -> "周二"; DayOfWeek.WEDNESDAY -> "周三"
     DayOfWeek.THURSDAY -> "周四"; DayOfWeek.FRIDAY -> "周五"; DayOfWeek.SATURDAY -> "周六"
@@ -48,6 +53,7 @@ fun StatsScreen(state: AppUiState) {
     val scroll = rememberScrollState()
     val stats = state.stats
     val week = state.week
+    val cumulative = state.cumulative
     val processed = state.processed
     val total = state.total
     val ratio = if (total > 0) (processed.toFloat() / total).coerceIn(0f, 1f) else 0f
@@ -152,6 +158,33 @@ fun StatsScreen(state: AppUiState) {
                 icon = { Icon(Icons.Default.Favorite, null, tint = dc.badgeKeepIcon, modifier = Modifier.size(22.dp)) },
                 value = "$keepPct%",
                 label = "保留的照片"
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        // ── 累计统计（累计整理 / 累计删除 / 累计保留）──
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            BigStat(
+                Modifier.weight(1f),
+                badge = dc.badgeOrganized,
+                icon = { Icon(Icons.Default.PhotoLibrary, null, tint = dc.badgeOrganizedIcon, modifier = Modifier.size(22.dp)) },
+                value = "${formatCount(cumulative.organizedTotal)} 张",
+                label = "累计整理"
+            )
+            BigStat(
+                Modifier.weight(1f),
+                badge = dc.badgeDeleted,
+                icon = { Icon(Icons.Default.Clear, null, tint = dc.badgeDeletedIcon, modifier = Modifier.size(22.dp)) },
+                value = "${formatCount(cumulative.deletedTotal)} 张",
+                label = "累计删除"
+            )
+            BigStat(
+                Modifier.weight(1f),
+                badge = dc.badgeKeptTotal,
+                icon = { Icon(Icons.Default.VerifiedUser, null, tint = dc.badgeKeptTotalIcon, modifier = Modifier.size(22.dp)) },
+                value = "${formatCount(cumulative.keptTotal)} 张",
+                label = "累计保留"
             )
         }
 

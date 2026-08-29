@@ -55,6 +55,7 @@ data class AppUiState(
     val settings: AppSettings = AppSettings(),
     val stats: HomeStats = HomeStats(),
     val week: WeekStats = WeekStats(List(7) { 0 }, 0, 0, 0),
+    val cumulative: StatsCounters = StatsCounters(),
 ) {
     val remaining: Int get() = session?.remaining ?: 0
 }
@@ -91,6 +92,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     private class UndoEntry(val photo: PhotoEntity, val oldState: PhotoState, val dir: Int)
     private val undoStack = ArrayDeque<UndoEntry>()
     private val counts = combine(repository.totalCount, repository.processedCount) { total, processed -> total to processed }
+    private val statsCounters = settingsRepository.statsCounters
     val trashItems: Flow<List<PhotoEntity>> = repository.trashItems
     private val homeStats = combine(
         repository.keptCount,
@@ -114,11 +116,25 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         }
         WeekStats(days, days.sum(), kept, freed)
     }
-    val ui = combine(settings, session, counts, homeStats, weekStats) { config, sess, c, stats, week ->
-        AppUiState(sess == null, sess, c.first, c.second, config, stats, week)
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, AppUiState())
+    // combine() only has typed overloads up to 5 flows; merge the counters in a second stage.
+    val ui = combine(
+        combine(settings, session, counts, homeStats, weekStats) { config, sess, c, stats, week ->
+            AppUiState(sess == null, sess, c.first, c.second, config, stats, week)
+        },
+        statsCounters
+    ) { base, cum -> base.copy(cumulative = cum) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, AppUiState())
 
-    init { reload() }
+    init {
+        reload()
+        // Seed the lifetime counters from the current DB state on the first run after upgrade,
+        // so existing installs don't start at zero. No-op afterwards.
+        viewModelScope.launch {
+            val processed = repository.processedCount.first()
+            val kept = repository.keptCount.first()
+            settingsRepository.backfillStatsCountersIfAbsent(kept, (processed - kept).coerceAtLeast(0))
+        }
+    }
 
     fun scan() = viewModelScope.launch { repository.scanGallery(settings.value); reload() }
 
@@ -200,6 +216,11 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         viewModelScope.launch {
             repository.apply(photo, state)
             repository.savePosition(newPos, queueIds)
+            when (state) {
+                PhotoState.KEEP -> settingsRepository.updateStatsCounters(1, 0)
+                PhotoState.DELETE_PENDING -> settingsRepository.updateStatsCounters(0, 1)
+                else -> {}
+            }
         }
         return true
     }
@@ -226,6 +247,9 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         viewModelScope.launch {
             repository.apply(photo, oldState)
             repository.savePosition(idx, cur.queue.map { it.mediaId })
+            // Reverse this action's own counter contribution (dir: 1=keep, -1=delete).
+            if (entry.dir == 1) settingsRepository.updateStatsCounters(-1, 0)
+            else settingsRepository.updateStatsCounters(0, -1)
         }
     }
 
@@ -252,10 +276,17 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     suspend fun pendingDeletes() = repository.pendingDeletes()
     fun confirmDeleted(ids: List<Long>) = viewModelScope.launch { Log.d(TAG, "confirmDeleted(${ids.size} photos)"); repository.confirmDeleted(ids) }
     suspend fun trashList(): List<PhotoEntity> = repository.trashList()
-    fun restoreFromTrash(ids: List<Long>) = viewModelScope.launch { repository.restoreFromTrash(ids) }
-    fun revertPendingDeletes(ids: List<Long>) = viewModelScope.launch { Log.d(TAG, "revertPendingDeletes(${ids.size})"); repository.revertPendingDeletes(ids) }
+    fun restoreFromTrash(ids: List<Long>) = viewModelScope.launch {
+        repository.restoreFromTrash(ids)
+        settingsRepository.updateStatsCounters(0, -ids.size)
+    }
+    fun revertPendingDeletes(ids: List<Long>) = viewModelScope.launch {
+        Log.d(TAG, "revertPendingDeletes(${ids.size})")
+        repository.revertPendingDeletes(ids)
+        settingsRepository.updateStatsCounters(0, -ids.size)
+    }
     fun deleteFromTrash(ids: List<Long>) = viewModelScope.launch { repository.deleteFromTrash(ids) }
-    fun reset() = viewModelScope.launch { repository.reset(); reload() }
+    fun reset() = viewModelScope.launch { repository.reset(); settingsRepository.resetStatsCounters(); reload() }
 
     // ── home-screen stats helpers ────────────────────────────────────────────
 

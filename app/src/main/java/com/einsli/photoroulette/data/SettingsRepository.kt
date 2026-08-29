@@ -22,6 +22,18 @@ data class AppSettings(
     val strategy: String = "random", // random | oldest | largest
 )
 
+/**
+ * Lifetime cumulative stats (累计整理 / 累计删除 / 累计保留), persisted independently of the
+ * photo table so they never shrink when trash items are purged or the gallery is rescanned.
+ * organized = kept + deleted, mirroring the design's 累计整理 = 累计删除 + 累计保留.
+ */
+data class StatsCounters(
+    val keptTotal: Int = 0,
+    val deletedTotal: Int = 0,
+) {
+    val organizedTotal: Int get() = keptTotal + deletedTotal
+}
+
 class SettingsRepository(private val context: Context) {
     private object Keys {
         val DAILY = intPreferencesKey("daily_count"); val VIDEO = booleanPreferencesKey("include_videos")
@@ -32,6 +44,8 @@ class SettingsRepository(private val context: Context) {
         val PHOTO_RANGE = stringPreferencesKey("photo_range")
         val CUSTOM_RANGE_START = longPreferencesKey("custom_range_start")
         val STRATEGY = stringPreferencesKey("strategy")
+        val KEPT_TOTAL = intPreferencesKey("stats_kept_total")
+        val DELETED_TOTAL = intPreferencesKey("stats_deleted_total")
     }
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { p ->
         val albumsRaw = p[Keys.ALBUMS].orEmpty()
@@ -67,4 +81,32 @@ class SettingsRepository(private val context: Context) {
         ids to (p[Keys.QUEUE_POS] ?: 0)
     }.let { it.first() }
     suspend fun clearQueue() = context.settingsDataStore.edit { it.remove(Keys.QUEUE_IDS); it.remove(Keys.QUEUE_DAY); it.remove(Keys.QUEUE_POS) }
+
+    val statsCounters: Flow<StatsCounters> = context.settingsDataStore.data.map { p ->
+        StatsCounters(
+            keptTotal = p[Keys.KEPT_TOTAL] ?: 0,
+            deletedTotal = p[Keys.DELETED_TOTAL] ?: 0,
+        )
+    }
+
+    /** Adjust the lifetime counters atomically; deltas may be negative (undo / restore). */
+    suspend fun updateStatsCounters(keptDelta: Int, deletedDelta: Int) = context.settingsDataStore.edit { p ->
+        p[Keys.KEPT_TOTAL] = ((p[Keys.KEPT_TOTAL] ?: 0) + keptDelta).coerceAtLeast(0)
+        p[Keys.DELETED_TOTAL] = ((p[Keys.DELETED_TOTAL] ?: 0) + deletedDelta).coerceAtLeast(0)
+    }
+
+    /** Full reset (used by the app's reset action) zeroes the lifetime counters too. */
+    suspend fun resetStatsCounters() = context.settingsDataStore.edit { p ->
+        p[Keys.KEPT_TOTAL] = 0
+        p[Keys.DELETED_TOTAL] = 0
+    }
+
+    /** One-time migration: the first launch after this feature seeds the counters from the
+     *  current DB state (kept / processed-kept) so existing installs don't start at zero. */
+    suspend fun backfillStatsCountersIfAbsent(kept: Int, deleted: Int) = context.settingsDataStore.edit { p ->
+        if (!p.contains(Keys.KEPT_TOTAL) && !p.contains(Keys.DELETED_TOTAL)) {
+            p[Keys.KEPT_TOTAL] = kept
+            p[Keys.DELETED_TOTAL] = deleted
+        }
+    }
 }

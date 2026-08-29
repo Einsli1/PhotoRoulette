@@ -35,6 +35,12 @@ data class DesignColors(
     val badgeSpaceIcon: Color,
     val badgeKeep: Color,       // 保留照片 badge (soft pink)
     val badgeKeepIcon: Color,
+    val badgeOrganized: Color,  // 累计整理 badge (purple stack)
+    val badgeOrganizedIcon: Color,
+    val badgeDeleted: Color,    // 累计删除 badge (red X)
+    val badgeDeletedIcon: Color,
+    val badgeKeptTotal: Color,  // 累计保留 badge (blue shield)
+    val badgeKeptTotalIcon: Color,
     val memoryDate: Color,
     val memoryCount: Color,
     val placeholderIcon: Color,
@@ -65,6 +71,12 @@ private val Light = DesignColors(
     badgeSpaceIcon = Color(0xFF009866),
     badgeKeep = Color(0xFFFDECF1),
     badgeKeepIcon = Color(0xFFF05F75),
+    badgeOrganized = Color(0xFFEFEBFB),
+    badgeOrganizedIcon = Color(0xFF6C55D6),
+    badgeDeleted = Color(0xFFFDEBE9),
+    badgeDeletedIcon = Color(0xFFE5484D),
+    badgeKeptTotal = Color(0xFFE9F0FE),
+    badgeKeptTotalIcon = Color(0xFF3D7BF5),
     memoryDate = Color(0xFF7A859D),
     memoryCount = Color(0xFF8B92A1),
     placeholderIcon = Color(0xFFB9C6E8),
@@ -95,6 +107,13 @@ private val Dark = DesignColors(
     badgeSpaceIcon = Color(0xFF83C058),
     badgeKeep = Color(0xFF2D202A),
     badgeKeepIcon = Color(0xFFEB6773),
+    // 累计 stats badges — dark values sampled from the tj.png design (purple stack / red X / blue shield)
+    badgeOrganized = Color(0xFF202741),
+    badgeOrganizedIcon = Color(0xFF6D7AD5),
+    badgeDeleted = Color(0xFF121922),
+    badgeDeletedIcon = Color(0xFFEB6953),
+    badgeKeptTotal = Color(0xFF1A2030),
+    badgeKeptTotalIcon = Color(0xFF448BF9),
     memoryDate = Color(0xFF9A9DB2),
     memoryCount = Color(0xFF8B8FA3),
     placeholderIcon = Color(0xFF3A4A5C),
