@@ -136,15 +136,14 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         }
     }
 
-    fun scan() = viewModelScope.launch { repository.scanGallery(settings.value); reload() }
+    fun scan() = reload()
 
-    /** Save the album selection, then rescan so the photo total reflects it. The scan only
-     *  INSERTs photos that are new to the DB — processed history (kept / deleted / streak) is
-     *  preserved; this is NOT a reset. */
+    /** Save the album selection, then rebuild — the reconcile inside reload() rescans, so the
+     *  photo total reflects it. The scan only INSERTs photos that are new to the DB — processed
+     *  history (kept / deleted / streak) is preserved; this is NOT a reset. */
     fun updateAlbums(albums: List<String>) = viewModelScope.launch {
         val next = settings.value.copy(includedAlbums = albums)
         settingsRepository.save(next)
-        repository.scanGallery(next)
         reload()
     }
     suspend fun availableAlbums(): List<String> = repository.listAlbums(settings.value.includeVideos)
@@ -157,7 +156,20 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         session.value = null
         val version = ++buildVersion
         viewModelScope.launch {
-            val restored = repository.sessionQueue(settings.value)
+            // 对账(含增量扫描)先于建队列:系统相册删除 / 系统回收站清空 / 系统相册侧恢复回收站
+            // 照片,都在这里同步进本地库。配置直接读 DataStore 的首个真实值——绝不拿默认配置跑
+            // 对账(会按"不含视频"误删视频行);读取失败或对账失败都只跳过对账,照常建队列。
+            val cfg = try { settingsRepository.settings.first() } catch (_: Exception) { null }
+            if (cfg != null) {
+                try {
+                    val r = repository.reconcile(cfg)
+                    Log.d(TAG, "reconcile: poolDeleted=${r.poolDeleted}, goneMarked=${r.goneMarked}, restored=${r.restoredCount}")
+                    if (r.restoredCount > 0) settingsRepository.updateStatsCounters(0, -r.restoredCount)
+                } catch (e: Exception) {
+                    Log.w(TAG, "reconcile failed, skipping this round", e)
+                }
+            }
+            val restored = repository.sessionQueue(cfg ?: settings.value)
             if (version == buildVersion) {
                 Log.d(TAG, "reload: publishing session $version with ${restored.queue.size} photos, position=${restored.position}")
                 session.value = ReviewSession(version, restored.queue, restored.position)
@@ -165,6 +177,18 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
             } else {
                 Log.d(TAG, "reload: version mismatch ($version vs $buildVersion), discarding")
             }
+        }
+    }
+
+    /** 后台对账但不重建会话:首页点「开始整理」续用进行中的会话时进度不能打断,同步照样做。 */
+    fun reconcileQuietly() = viewModelScope.launch {
+        val cfg = try { settingsRepository.settings.first() } catch (_: Exception) { null } ?: return@launch
+        try {
+            val r = repository.reconcile(cfg)
+            Log.d(TAG, "quiet reconcile: poolDeleted=${r.poolDeleted}, goneMarked=${r.goneMarked}, restored=${r.restoredCount}")
+            if (r.restoredCount > 0) settingsRepository.updateStatsCounters(0, -r.restoredCount)
+        } catch (e: Exception) {
+            Log.w(TAG, "quiet reconcile failed", e)
         }
     }
 
@@ -256,13 +280,11 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     // Individual setters — save immediately without rebuilding the queue. The new values take
     // effect on the next session / 开始整理 (or immediately for darkMode via theme recomposition).
     fun setDailyCount(v: Int) = viewModelScope.launch { settingsRepository.save(settings.value.copy(dailyCount = v)) }
-    // Toggling 包含视频 rescans immediately so the pool reflects the change: turning it ON pulls
-    // videos in right away (previously this only saved the flag — videos never appeared until the
-    // next album rescan), turning it OFF drops unprocessed videos from the pool.
+    // Toggling 包含视频 rescans via reload()'s reconcile: turning it ON pulls videos in right
+    // away, turning it OFF drops unprocessed videos from the pool.
     fun setIncludeVideos(v: Boolean) = viewModelScope.launch {
         val next = settings.value.copy(includeVideos = v)
         settingsRepository.save(next)
-        repository.scanGallery(next)
         reload()
     }
     fun setIncludeScreenshots(v: Boolean) = viewModelScope.launch { settingsRepository.save(settings.value.copy(includeScreenshots = v)) }

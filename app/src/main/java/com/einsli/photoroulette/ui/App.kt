@@ -305,8 +305,10 @@ private fun PageContent(
             // rebuilds asynchronously, which makes the 今日任务 card flicker (加载中 / 暂无图片 /
             // 总数量) while the Review page zooms in. Only rebuild when there is nothing to
             // continue; an in-progress session goes straight to the Review page as-is.
+            // 每次点整理都触发一次与系统相册的对账:无会话时由 reload() 内置,续用中的会话走
+            // reconcileQuietly(后台同步,不打断队列)。
             val inProgress = state.session != null && state.remaining > 0
-            if (!inProgress) viewModel.reload()
+            if (!inProgress) viewModel.reload() else viewModel.reconcileQuietly()
             onNavigate(2)
         }, onScan = onScan, onOpenMemory = { onNavigate(5) })
         1 -> Settings(state.settings, viewModel, scrollState = settingsScroll, savedScroll = savedSettingsScroll, openTrash = { onNavigate(3) })

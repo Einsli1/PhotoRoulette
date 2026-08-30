@@ -1,6 +1,7 @@
 package com.einsli.photoroulette.media
 
 import android.content.ContentResolver
+import android.os.Bundle
 import android.provider.MediaStore
 import com.einsli.photoroulette.data.PhotoEntity
 
@@ -30,6 +31,28 @@ class MediaScanner(private val resolver: ContentResolver) {
                 }
             } }
         } ?: emptyList()
+    }
+
+    /**
+     * 全量存在性检查:系统里当前所有图片/视频的 mediaId,供对账判断哪些本地行已被外部删除。
+     * 与 [scan] 不同:不做相册/截图/视频过滤,且必须 MATCH_INCLUDE 回收站与 PENDING 文件——
+     * 普通查询不返回 trashed 项,漏掉它们会把刚移入系统回收站的照片误判成"已彻底删除"。
+     * 查询失败直接抛出,绝不返回部分/空结果——调用方据此放弃本次对账,避免误删。
+     */
+    fun scanExistingIds(): Set<Long> {
+        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        val bundle = Bundle().apply {
+            putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
+            putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+            putString(ContentResolver.QUERY_ARG_SQL_SELECTION, "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)")
+            putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arrayOf(
+                MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+                MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()))
+        }
+        return resolver.query(collection, arrayOf(MediaStore.MediaColumns._ID), bundle, null)?.use { cursor ->
+            val id = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+            buildSet { while (cursor.moveToNext()) add(cursor.getLong(id)) }
+        } ?: error("MediaStore existence query returned null")
     }
 
     fun listAlbums(includeVideos: Boolean = false): List<String> {

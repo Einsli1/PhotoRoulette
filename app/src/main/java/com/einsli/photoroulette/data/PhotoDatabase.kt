@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [PhotoEntity::class], version = 5, exportSchema = false)
+@Database(entities = [PhotoEntity::class], version = 6, exportSchema = false)
 abstract class PhotoDatabase : RoomDatabase() {
     abstract fun photoDao(): PhotoDao
     companion object {
@@ -26,8 +26,16 @@ abstract class PhotoDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE photos ADD COLUMN duration INTEGER NOT NULL DEFAULT 0")
             }
         }
+        // 5 → 6: photos.gone — set when the file is gone from MediaStore entirely (deleted
+        // outside the app / purged from the system trash). Hidden from pool/counts/trash/
+        // memories but the row stays so weekly stats and the streak are never rewritten.
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE photos ADD COLUMN gone INTEGER NOT NULL DEFAULT 0")
+            }
+        }
         fun create(context: Context): PhotoDatabase = Room.databaseBuilder(
             context, PhotoDatabase::class.java, "photo-roulette.db"
-        ).addMigrations(MIGRATION_3_4, MIGRATION_4_5).fallbackToDestructiveMigration().build()
+        ).addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6).fallbackToDestructiveMigration().build()
     }
 }

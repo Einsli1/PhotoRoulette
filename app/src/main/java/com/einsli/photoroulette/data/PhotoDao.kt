@@ -41,7 +41,7 @@ interface PhotoDao {
     @Query("SELECT * FROM photos WHERE state IN ('UNSEEN', 'SKIP') AND inTrash = 0 AND (:minDate IS NULL OR dateTaken >= :minDate) AND (:maxDate IS NULL OR dateTaken < :maxDate) ORDER BY size DESC LIMIT :limit")
     suspend fun largestCandidates(limit: Int, minDate: Long?, maxDate: Long?): List<PhotoEntity>
 
-    @Query("SELECT * FROM photos WHERE mediaId IN (:ids)")
+    @Query("SELECT * FROM photos WHERE mediaId IN (:ids) AND gone = 0")
     suspend fun byIds(ids: List<Long>): List<PhotoEntity>
 
     @Query("UPDATE photos SET lastShownDay = :day WHERE mediaId IN (:ids)")
@@ -60,14 +60,14 @@ interface PhotoDao {
     // swipes a photo into the delete flow (confirmDeleted flips inTrash right after), so it
     // is the app's "trashed at" time; IFNULL keeps hypothetically-NULL rows at the bottom
     // and dateTaken breaks ties.
-    @Query("SELECT * FROM photos WHERE inTrash = 1 ORDER BY IFNULL(processedAt, 0) DESC, dateTaken DESC")
+    @Query("SELECT * FROM photos WHERE inTrash = 1 AND gone = 0 ORDER BY IFNULL(processedAt, 0) DESC, dateTaken DESC")
     fun trashItems(): Flow<List<PhotoEntity>>
 
     // Trash page order: most recently deleted first. processedAt is stamped when the user
     // swipes a photo into the delete flow (confirmDeleted flips inTrash right after), so it
     // is the app's "trashed at" time; IFNULL keeps hypothetically-NULL rows at the bottom
     // and dateTaken breaks ties.
-    @Query("SELECT * FROM photos WHERE inTrash = 1 ORDER BY IFNULL(processedAt, 0) DESC, dateTaken DESC")
+    @Query("SELECT * FROM photos WHERE inTrash = 1 AND gone = 0 ORDER BY IFNULL(processedAt, 0) DESC, dateTaken DESC")
     suspend fun trashNow(): List<PhotoEntity>
 
     @Query("UPDATE photos SET inTrash = 0, state = 'UNSEEN' WHERE mediaId IN (:ids)")
@@ -82,16 +82,18 @@ interface PhotoDao {
     @Query("DELETE FROM photos WHERE mediaId IN (:ids)")
     suspend fun deleteByIds(ids: List<Long>)
 
-    @Query("SELECT COUNT(*) FROM photos WHERE state != 'UNSEEN' AND state != 'SKIP'")
+    // gone=0 on every "presence" count below: reconciled-away rows (deleted outside the app)
+    // must stop inflating the totals, while the row itself keeps feeding history stats.
+    @Query("SELECT COUNT(*) FROM photos WHERE state != 'UNSEEN' AND state != 'SKIP' AND gone = 0")
     fun processedCount(): Flow<Int>
 
-    @Query("SELECT COUNT(*) FROM photos WHERE state = 'KEEP'")
+    @Query("SELECT COUNT(*) FROM photos WHERE state = 'KEEP' AND gone = 0")
     fun keptCount(): Flow<Int>
 
-    @Query("SELECT COUNT(*) FROM photos")
+    @Query("SELECT COUNT(*) FROM photos WHERE gone = 0")
     fun totalCount(): Flow<Int>
 
-    @Query("SELECT COUNT(*) FROM photos")
+    @Query("SELECT COUNT(*) FROM photos WHERE gone = 0")
     suspend fun totalNow(): Int
 
     // Distinct local calendar days on which any photo was processed — used to compute the
@@ -101,12 +103,35 @@ interface PhotoDao {
 
     // Total bytes of photos currently sitting in the app's trash (i.e. space the user has
     // moved out of the gallery).
-    @Query("SELECT COALESCE(SUM(size), 0) FROM photos WHERE inTrash = 1")
+    @Query("SELECT COALESCE(SUM(size), 0) FROM photos WHERE inTrash = 1 AND gone = 0")
     fun trashBytes(): Flow<Long>
 
     // Photos that could be "memories" (have a taken date and are not deleted/trashed).
-    @Query("SELECT * FROM photos WHERE inTrash = 0 AND dateTaken > 0 AND state != 'DELETE' ORDER BY dateTaken DESC")
+    @Query("SELECT * FROM photos WHERE inTrash = 0 AND gone = 0 AND dateTaken > 0 AND state != 'DELETE' ORDER BY dateTaken DESC")
     fun memoryCandidates(): Flow<List<PhotoEntity>>
+
+    // ── reconcile (对账): sync rows that vanished from MediaStore outside the app ──
+
+    // All live mediaIds to diff against MediaStore's existence set.
+    @Query("SELECT mediaId FROM photos WHERE gone = 0")
+    suspend fun activeIds(): List<Long>
+
+    // Dead rows that were never processed carry no history (processedAt NULL): delete outright.
+    @Query("DELETE FROM photos WHERE gone = 0 AND inTrash = 0 AND state IN ('UNSEEN', 'SKIP', 'DELETE_PENDING') AND mediaId IN (:ids)")
+    suspend fun deleteDeadPool(ids: List<Long>): Int
+
+    // Dead rows that WERE processed (keep / trash): mark gone so they leave the pool, totals,
+    // trash page and memories, but keep processedAt for weekly stats and the streak.
+    @Query("UPDATE photos SET gone = 1 WHERE gone = 0 AND mediaId IN (:ids)")
+    suspend fun markGone(ids: List<Long>): Int
+
+    @Query("SELECT mediaId FROM photos WHERE gone = 0 AND inTrash = 1")
+    suspend fun trashIds(): List<Long>
+
+    // The user restored a trash photo from the system gallery: mirror the app's own restore
+    // (inTrash=0, state=UNSEEN, processedAt kept) — the caller backs out the deleted counter.
+    @Query("UPDATE photos SET inTrash = 0, state = 'UNSEEN' WHERE gone = 0 AND inTrash = 1 AND mediaId IN (:ids)")
+    suspend fun syncExternallyRestored(ids: List<Long>): Int
 
     // ── weekly stats ──
     data class DayCount(val day: String, val cnt: Int)

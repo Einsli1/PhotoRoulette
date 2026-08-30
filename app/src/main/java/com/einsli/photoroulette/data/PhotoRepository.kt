@@ -1,9 +1,15 @@
 package com.einsli.photoroulette.data
 
 import com.einsli.photoroulette.media.MediaScanner
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 
 data class SessionQueue(val position: Int, val queue: List<PhotoEntity>)
+
+/** One reconcile pass: rows removed from the never-processed pool, rows marked gone
+ *  (processed, kept for history), trash photos the user restored in the system gallery. */
+data class ReconcileResult(val poolDeleted: Int, val goneMarked: Int, val restoredCount: Int)
 
 class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScanner, private val settings: SettingsRepository) {
     val processedCount: Flow<Int> = dao.processedCount()
@@ -29,7 +35,12 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
         }
     }
 
-    suspend fun scanGallery(config: AppSettings): Int {
+    suspend fun scanGallery(config: AppSettings): Int = withContext(Dispatchers.IO) {
+        upsertFromScan(config)
+        dao.totalNow()
+    }
+
+    private suspend fun upsertFromScan(config: AppSettings): List<PhotoEntity> = withContext(Dispatchers.IO) {
         val scanned = scanner.scan(config.includeVideos, config.includeScreenshots, config.includedAlbums)
         dao.insertAll(scanned)
         // Old video rows keep duration=0 (insertAll IGNORE): backfill from the fresh scan so
@@ -44,7 +55,35 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
         if (!config.includeVideos) {
             dao.deleteOutOfVideoScope()
         }
-        return dao.totalNow()
+        scanned
+    }
+
+    /**
+     * 对账:让本地库跟上系统相册 / 系统回收站的外部变化(每次建整理队列前调用)。
+     * 1) 增量扫描照常入库(新照片、相册范围、截图/视频开关);
+     * 2) 系统里已彻底删除的行:未处理过的直接删,处理过的(保留/回收站)标 gone=1——
+     *    从候选池/总数/回收站页/回忆里消失,但 processedAt 留存,周统计与连续天数不被追溯改写;
+     * 3) 用户在系统相册恢复了回收站照片 → 同步恢复回待整理池(调用方回退累计删除计数)。
+     * 任一步抛异常即整体放弃(调用方跳过本次对账),绝不基于不完整的 MediaStore 结果动手。
+     */
+    suspend fun reconcile(config: AppSettings): ReconcileResult = withContext(Dispatchers.IO) {
+        val scanned = upsertFromScan(config)
+        val existing = scanner.scanExistingIds()
+        // 同一轮扫描有结果而存在性查询为空,说明后者出了问题:宁可不对账也不批量误删。
+        if (existing.isEmpty() && scanned.isNotEmpty()) error("existence query empty while scan found ${scanned.size} rows")
+        val dead = dao.activeIds().filter { it !in existing }
+        var poolDeleted = 0
+        var goneMarked = 0
+        // 分块避开 SQLite IN 参数上限;deleteDeadPool 先行,markGone 只会命中余下的已处理行。
+        for (chunk in dead.chunked(900)) poolDeleted += dao.deleteDeadPool(chunk)
+        for (chunk in dead.chunked(900)) goneMarked += dao.markGone(chunk)
+        // 常规扫描(不含系统回收站)里出现的回收站行 = 在系统相册被恢复了。
+        val scanIds = scanned.map { it.mediaId }.toHashSet()
+        var restoredCount = 0
+        for (chunk in dao.trashIds().filter { it in scanIds }.chunked(900)) {
+            restoredCount += dao.syncExternallyRestored(chunk)
+        }
+        ReconcileResult(poolDeleted, goneMarked, restoredCount)
     }
 
     suspend fun listAlbums(includeVideos: Boolean = false): List<String> = scanner.listAlbums(includeVideos)
