@@ -11,7 +11,9 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -376,6 +378,14 @@ private fun TrashPageBackdrop(
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("回收站", style = MaterialTheme.typography.headlineMedium)
+            // 镜像页同步的选中数量提示（不可交互，仅保持与真实页面像素一致）
+            if (selected.isNotEmpty()) {
+                Text(
+                    "已选 ${selected.size}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Button(onClick = {}) { Text("返回") }
         }
         Spacer(Modifier.height(8.dp))
@@ -385,7 +395,7 @@ private fun TrashPageBackdrop(
             Button(onClick = {}) { Text("批量删除") }
         }
         Spacer(Modifier.height(4.dp))
-        Text("长按选中，点击预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("长按选中，点击圆圈多选，点击照片预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(8.dp))
         LazyVerticalGrid(
             state = state,
@@ -405,23 +415,51 @@ private fun TrashPageBackdrop(
                 ) {
                     VideoAwareImage(photo, Modifier.fillMaxSize(), thumbSize = thumbSize)
                     VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
-                    if (checked) {
-                        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
-                        Icon(
-                            Icons.Default.Check,
-                            contentDescription = "已选中",
-                            tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(6.dp)
-                                .size(24.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary)
-                                .padding(3.dp)
-                        )
+                    // 镜像页的右下角选中圆圈（静态、不可交互——只在预览下拉时露出）；
+                    // 与宫格一致，仅在有选中照片时显示。
+                    if (selected.isNotEmpty()) {
+                        Box(Modifier.align(Alignment.BottomEnd)) {
+                            TrashSelectionBadge(checked)
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+/** 回收站宫格右下角的选中标识：未选中=空心圆圈（深色细描边 + 白色圆环，任何照片上都看得清），
+ *  已选中=实心圆 + 对勾。选中状态只体现在这个圆圈上，照片本身保持原色。 */
+@Composable
+private fun TrashSelectionBadge(checked: Boolean, modifier: Modifier = Modifier) {
+    Box(
+        modifier
+            .padding(6.dp) // 距 cell 边缘的间距
+            .padding(2.dp) // 圆圈外圈留白（也扩大了可点击范围）
+            .then(
+                if (checked) {
+                    Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                        .border(1.dp, Color.White.copy(alpha = 0.9f), CircleShape)
+                } else {
+                    Modifier
+                        .size(22.dp)
+                        .border(1.dp, Color.Black.copy(alpha = 0.3f), CircleShape)
+                        .padding(1.5.dp)
+                        .border(1.5.dp, Color.White, CircleShape)
+                }
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (checked) {
+            Icon(
+                Icons.Default.Check,
+                contentDescription = "已选中",
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(14.dp),
+            )
         }
     }
 }
@@ -567,6 +605,14 @@ private fun MemoryPageBackdrop(
                     ) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Text("回收站", style = MaterialTheme.typography.headlineMedium)
+                            // 选中数量提示：显示在标题与返回按钮之间，无选中时不占位
+                            if (selected.isNotEmpty()) {
+                                Text(
+                                    "已选 ${selected.size}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                             Button(onBack) { Text("返回") }
                         }
                         Spacer(Modifier.height(8.dp))
@@ -585,7 +631,7 @@ private fun MemoryPageBackdrop(
                             }) { Text("批量删除") }
                         }
                         Spacer(Modifier.height(4.dp))
-                        Text("长按选中，点击预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("长按选中，点击圆圈多选，点击照片预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.height(8.dp))
                         // Only the grid area is elastic: the header and buttons stay fixed, so the
                         // pull (drag past the edge or the fling-limit spring) moves just the photos.
@@ -640,20 +686,22 @@ private fun MemoryPageBackdrop(
                                         ) {
                                             SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize, fitOnEnter = photo.mediaId == closedMediaId)
                                             VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
-                                            if (checked) {
-                                                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
-                                                Icon(
-                                                    Icons.Default.Check,
-                                                    contentDescription = "已选中",
-                                                    tint = MaterialTheme.colorScheme.onPrimary,
-                                                    modifier = Modifier
-                                                        .align(Alignment.TopEnd)
-                                                        .padding(6.dp)
-                                                        .size(24.dp)
-                                                        .clip(CircleShape)
-                                                        .background(MaterialTheme.colorScheme.primary)
-                                                        .padding(3.dp)
-                                                )
+                                            // 右下角选中圆圈：平时不显示；只要选中了任意一张，
+                                            // 所有照片都显示圆圈（选中的实心、未选的空心），点圆圈
+                                            // 切换选中（不触发预览），照片本身不变色。
+                                            if (selected.isNotEmpty()) {
+                                                Box(
+                                                    Modifier
+                                                        .align(Alignment.BottomEnd)
+                                                        .clickable(
+                                                            interactionSource = remember { MutableInteractionSource() },
+                                                            indication = null,
+                                                        ) {
+                                                            selected = if (checked) selected - photo.mediaId else selected + photo.mediaId
+                                                        },
+                                                ) {
+                                                    TrashSelectionBadge(checked)
+                                                }
                                             }
                                         }
                                     }

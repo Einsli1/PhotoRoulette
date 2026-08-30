@@ -56,10 +56,18 @@ interface PhotoDao {
     @Query("UPDATE photos SET state = 'DELETE', inTrash = 1 WHERE mediaId IN (:ids)")
     suspend fun confirmDeleted(ids: List<Long>)
 
-    @Query("SELECT * FROM photos WHERE inTrash = 1 ORDER BY dateTaken DESC")
+    // Trash page order: most recently deleted first. processedAt is stamped when the user
+    // swipes a photo into the delete flow (confirmDeleted flips inTrash right after), so it
+    // is the app's "trashed at" time; IFNULL keeps hypothetically-NULL rows at the bottom
+    // and dateTaken breaks ties.
+    @Query("SELECT * FROM photos WHERE inTrash = 1 ORDER BY IFNULL(processedAt, 0) DESC, dateTaken DESC")
     fun trashItems(): Flow<List<PhotoEntity>>
 
-    @Query("SELECT * FROM photos WHERE inTrash = 1 ORDER BY dateTaken DESC")
+    // Trash page order: most recently deleted first. processedAt is stamped when the user
+    // swipes a photo into the delete flow (confirmDeleted flips inTrash right after), so it
+    // is the app's "trashed at" time; IFNULL keeps hypothetically-NULL rows at the bottom
+    // and dateTaken breaks ties.
+    @Query("SELECT * FROM photos WHERE inTrash = 1 ORDER BY IFNULL(processedAt, 0) DESC, dateTaken DESC")
     suspend fun trashNow(): List<PhotoEntity>
 
     @Query("UPDATE photos SET inTrash = 0, state = 'UNSEEN' WHERE mediaId IN (:ids)")
