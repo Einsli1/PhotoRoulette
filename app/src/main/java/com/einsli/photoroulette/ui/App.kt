@@ -28,8 +28,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -38,7 +40,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.Settings
-import android.widget.NumberPicker
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -49,8 +50,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -66,8 +74,11 @@ import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
 import kotlin.math.roundToInt
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -75,6 +86,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.snapshotFlow
@@ -1150,7 +1162,7 @@ private fun formatTaken(taken: Long): String =
         // ── 外观 ──
         SettingCard {
             SettingValueRow(label = "外观") {
-                SettingDropdown(
+                SettingOptionPicker(
                     options = listOf("跟随系统" to 0, "浅色" to 1, "深色" to 2),
                     selectedValue = settings.darkMode,
                     onSelect = vm::setDarkMode
@@ -1159,63 +1171,33 @@ private fun formatTaken(taken: Long): String =
         }
         Spacer(Modifier.height(12.dp))
 
-        // ── 每次整理数量: tap the value to expand the wheel (5–100, step 5) ──
-        var count by remember(settings.dailyCount) { mutableIntStateOf(settings.dailyCount) }
-        var showCountWheel by remember { mutableStateOf(false) }
+        // ── 每次整理数量: 药丸触发悬浮滚轮(5–100, 步进1)——浮层不撑高卡片 ──
         SettingCard {
-            SettingValueRow(
-                label = "每次整理数量",
-                onClick = { showCountWheel = !showCountWheel },
-                expanded = showCountWheel
-            ) {
-                Text("$count 张", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = dc.accentText)
-            }
-            AnimatedVisibility(
-                visible = showCountWheel,
-                enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(220)),
-                exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(180))
-            ) {
-                WheelNumberPicker(
-                    values = (5..100 step 5).toList(),
-                    selected = count,
-                    modifier = Modifier.fillMaxWidth(),
-                    onValueChange = { count = it; vm.setDailyCount(it) }
+            SettingValueRow(label = "每次整理数量") {
+                SettingValueWheel(
+                    title = "每次整理数量",
+                    label = "${settings.dailyCount} 张",
+                    values = (5..100).toList(),
+                    selected = settings.dailyCount,
+                    unit = "张",
+                    onSelect = vm::setDailyCount,
                 )
             }
         }
         Spacer(Modifier.height(12.dp))
 
-        // ── 每日提醒: tap the time to expand hour / minute wheels ──
-        var hour by remember(settings.reminderHour) { mutableIntStateOf(settings.reminderHour) }
-        var minute by remember(settings.reminderMinute) { mutableIntStateOf(settings.reminderMinute) }
-        var showTimeWheel by remember { mutableStateOf(false) }
+        // ── 每日提醒: 与数量选择同款的悬浮卡片, 双滚轮(时/分) ──
         SettingCard {
-            SettingValueRow(
-                label = "每日提醒",
-                onClick = { showTimeWheel = !showTimeWheel },
-                expanded = showTimeWheel
-            ) {
-                Text("${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = dc.accentText)
-            }
-            AnimatedVisibility(
-                visible = showTimeWheel,
-                enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(220)),
-                exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(180))
-            ) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                    WheelNumberPicker(
-                        values = (0..23).toList(),
-                        selected = hour,
-                        onValueChange = { hour = it; vm.setReminderHour(it) }
-                    )
-                    Text(":", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = dc.ink, modifier = Modifier.padding(horizontal = 8.dp))
-                    WheelNumberPicker(
-                        values = (0..59).toList(),
-                        selected = minute,
-                        onValueChange = { minute = it; vm.setReminderMinute(it) }
-                    )
-                }
-            }
+        SettingValueRow(label = "每日提醒") {
+            SettingTimeWheel(
+                label = "${settings.reminderHour.toString().padStart(2, '0')}:${settings.reminderMinute.toString().padStart(2, '0')}",
+                title = "每日提醒",
+                hour = settings.reminderHour,
+                minute = settings.reminderMinute,
+                onHour = { vm.setReminderHour(it) },
+                onMinute = { vm.setReminderMinute(it) },
+            )
+        }
             // SCHEDULE_EXACT_ALARM 在 Android 14+ 默认拒绝,没有它提醒可能延迟几分钟。
             // 点这行进系统设置授权,回来(onResume)后会自动改用精确闹钟。
             val ctx = LocalContext.current
@@ -1243,7 +1225,7 @@ private fun formatTaken(taken: Long): String =
         // ── 照片范围 ──
         SettingCard {
             SettingValueRow(label = "照片范围") {
-                SettingDropdown(
+                SettingOptionPicker(
                     options = listOf(
                         "全部照片" to "all",
                         "最近一年" to "lastYear",
@@ -1288,7 +1270,7 @@ private fun formatTaken(taken: Long): String =
         // ── 整理策略 ──
         SettingCard {
             SettingValueRow(label = "整理策略") {
-                SettingDropdown(
+                SettingOptionPicker(
                     options = listOf(
                         "随机" to "random",
                         "优先旧照片" to "oldest",
@@ -1437,75 +1419,301 @@ private fun SettingValueRow(
     }
 }
 
-/** Compact pill-shaped dropdown for a single-choice setting; sits on the right of a row. */
-@OptIn(ExperimentalMaterial3Api::class)
+/** 悬浮卡片式单选下拉：与滚轮选择器同一套卡片和展开/收回动画，点选项即确认并收回。 */
 @Composable
-private fun <T> SettingDropdown(
+private fun <T> SettingOptionPicker(
     options: List<Pair<String, T>>,
     selectedValue: T,
     onSelect: (T) -> Unit,
 ) {
     val dc = designColors()
-    var expanded by remember { mutableStateOf(false) }
     val selectedLabel = options.firstOrNull { it.second == selectedValue }?.first ?: options.first().first
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
-        Row(
-            Modifier
-                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
-                .clip(RoundedCornerShape(10.dp))
-                .background(if (expanded) dc.accent.copy(alpha = 0.14f) else dc.white)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(selectedLabel, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.accentText)
-            Spacer(Modifier.width(4.dp))
-            Icon(Icons.Default.ArrowDropDown, null, tint = dc.labelGray, modifier = Modifier.size(18.dp))
-        }
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+    SettingPopupPicker(label = selectedLabel, title = null, cardWidth = 0.dp, showConfirm = false) { dismiss ->
+        Column(Modifier.padding(vertical = 2.dp)) {
             options.forEach { (display, value) ->
-                DropdownMenuItem(
-                    text = { Text(display) },
-                    onClick = {
-                        onSelect(value)
-                        expanded = false
-                    }
-                )
+                val selected = value == selectedValue
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable {
+                            onSelect(value)
+                            dismiss()
+                        }
+                        .padding(horizontal = 8.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        display,
+                        fontSize = 14.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (selected) dc.accentText else dc.ink,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    if (selected) Icon(Icons.Default.Check, null, tint = dc.accent, modifier = Modifier.size(15.dp))
+                }
             }
         }
     }
 }
 
-/** Classic Android spinner wheel over a fixed list of Int values. Colors are set explicitly so
- *  the wheel matches the app's own theme (the activity theme follows the SYSTEM dark mode). */
+/** Pill trigger + floating picker card shared by the wheel-based settings. Owns the open/close
+ *  state and the two-way scale/fade animation (grows from the pill corner, shrinks back on
+ *  dismiss) and positions the popup just below the pill (end-aligned), flipping above when
+ *  there is no room below. [content] goes between the title and the "完成" confirm button.
+ *  不能用 DropdownMenu：它测弹窗尺寸时会查询 intrinsic measurements，而 LazyColumn
+ *  (SubcomposeLayout) 不支持 intrinsic → 打开即崩。普通 Popup 自行定位。 */
 @Composable
-private fun WheelNumberPicker(
-    values: List<Int>,
-    selected: Int,
-    modifier: Modifier = Modifier,
-    onValueChange: (Int) -> Unit,
+private fun SettingPopupPicker(
+    label: String,
+    title: String? = null,
+    cardWidth: Dp = 248.dp,
+    showConfirm: Boolean = true,
+    content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
     val dc = designColors()
-    AndroidView(
-        modifier = modifier,
-        factory = { ctx ->
-            NumberPicker(ctx).apply {
-                wrapSelectorWheel = false
-                displayedValues = values.map { it.toString() }.toTypedArray()
-                minValue = 0
-                maxValue = values.size - 1
-                value = values.indexOf(selected).coerceAtLeast(0)
-                setOnValueChangedListener { _, _, newVal -> onValueChange(values[newVal]) }
+    var expanded by remember { mutableStateOf(false) }
+    var closing by remember { mutableStateOf(false) }
+    fun closePicker() { if (!closing) closing = true }
+    // 两段式开关：收起时先播动画（closing=true，popup 保持组合），结束后才真正移除。
+    val progress = remember { Animatable(0f) }
+    LaunchedEffect(expanded, closing) {
+        when {
+            expanded && !closing -> progress.animateTo(1f, tween(200, easing = FastOutSlowInEasing))
+            closing -> {
+                progress.animateTo(0f, tween(150, easing = FastOutSlowInEasing))
+                expanded = false
+                closing = false
             }
-        },
-        update = { picker ->
-            // setTextColor exists (API 29+). The divider-color setters were removed from the SDK
-            // on newer APIs, so only the text color is themed here.
-            picker.setTextColor(dc.ink.toArgb())
-            val idx = values.indexOf(selected)
-            if (idx >= 0 && picker.value != idx) picker.value = idx
         }
-    )
+    }
+    Box {
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (expanded && !closing) dc.accent.copy(alpha = 0.14f) else dc.white)
+                .clickable {
+                    if (expanded && !closing) closePicker() else { closing = false; expanded = true }
+                }
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.accentText)
+            Spacer(Modifier.width(4.dp))
+            Icon(Icons.Default.ArrowDropDown, null, tint = dc.labelGray, modifier = Modifier.size(18.dp))
+        }
+        val gapPx = with(LocalDensity.current) { 8.dp.toPx() }.roundToInt()
+        val marginPx = with(LocalDensity.current) { 12.dp.toPx() }.roundToInt()
+        val popupPosition = remember(gapPx, marginPx) {
+            object : PopupPositionProvider {
+                override fun calculatePosition(
+                    anchorBounds: IntRect,
+                    windowSize: IntSize,
+                    layoutDirection: LayoutDirection,
+                    popupContentSize: IntSize,
+                ): IntOffset {
+                    val x = (anchorBounds.right - popupContentSize.width)
+                        .coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
+                    var y = anchorBounds.bottom + gapPx
+                    if (y + popupContentSize.height > windowSize.height - marginPx) {
+                        y = anchorBounds.top - popupContentSize.height - gapPx
+                    }
+                    y = y.coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
+                    return IntOffset(x, y)
+                }
+            }
+        }
+        if (expanded || closing) {
+            Popup(
+                popupPositionProvider = popupPosition,
+                onDismissRequest = { closePicker() },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Box(
+                    Modifier
+                        .padding(4.dp)
+                        .graphicsLayer {
+                            // 从药丸方向（右上角）缩放展开/收回，配合透明度。
+                            val p = progress.value
+                            alpha = p
+                            scaleX = 0.85f + 0.15f * p
+                            scaleY = 0.85f + 0.15f * p
+                            transformOrigin = TransformOrigin(1f, 0f)
+                        },
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = dc.white,
+                        shadowElevation = 8.dp,
+                    ) {
+                        Column(
+                            Modifier
+                                .then(if (cardWidth > 0.dp) Modifier.width(cardWidth) else Modifier.widthIn(min = 88.dp))
+                                .padding(start = 8.dp, end = 8.dp, bottom = if (showConfirm) 14.dp else 6.dp)
+                        ) {
+                            if (title == null) {
+                                Spacer(Modifier.height(4.dp))
+                            } else {
+                                Spacer(Modifier.height(14.dp))
+                                Text(
+                                    title,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = dc.labelGray,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                Spacer(Modifier.height(8.dp))
+                            }
+                            content { closePicker() }
+                            if (showConfirm) {
+                                Spacer(Modifier.height(12.dp))
+                                Button(
+                                    onClick = { closePicker() },
+                                    Modifier.fillMaxWidth().height(40.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White),
+                                ) { Text("完成", fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
+
+/** 每次整理数量：单滚轮（悬浮卡片内）。 */
+@Composable
+private fun SettingValueWheel(
+    title: String,
+    label: String,
+    values: List<Int>,
+    selected: Int,
+    unit: String,
+    onSelect: (Int) -> Unit,
+) {
+    SettingPopupPicker(label = label, title = title, cardWidth = 132.dp) {
+        StyledNumberWheel(values = values, selected = selected, unit = unit, onSelected = onSelect)
+    }
+}
+
+/** 每日提醒：双滚轮（时/分），与数量选择同款悬浮卡片。 */
+@Composable
+private fun SettingTimeWheel(
+    title: String,
+    label: String,
+    hour: Int,
+    minute: Int,
+    onHour: (Int) -> Unit,
+    onMinute: (Int) -> Unit,
+) {
+    val dc = designColors()
+    SettingPopupPicker(label = label, title = title) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            StyledNumberWheel(
+                values = (0..23).toList(),
+                selected = hour,
+                unit = "",
+                format = { it.toString().padStart(2, '0') },
+                onSelected = onHour,
+                modifier = Modifier.weight(1f),
+            )
+            Text(":", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = dc.ink)
+            StyledNumberWheel(
+                values = (0..59).toList(),
+                selected = minute,
+                unit = "",
+                format = { it.toString().padStart(2, '0') },
+                onSelected = onMinute,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+private val WheelItemHeight = 34.dp
+
+/** Custom snap-scrolling number wheel: the centered row is the selection — big bold accent
+ *  value with the unit beside it, neighbours in gray, a soft accent band behind the center and
+ *  gradient fades at the edges. Tapping a neighbour animates it to the center. */
+@Composable
+private fun StyledNumberWheel(
+    values: List<Int>,
+    selected: Int,
+    unit: String,
+    format: (Int) -> String = { it.toString() },
+    onSelected: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val dc = designColors()
+    val scope = rememberCoroutineScope()
+    val itemPx = with(LocalDensity.current) { WheelItemHeight.toPx() }
+    val initialIdx = values.indexOf(selected).coerceIn(0, values.lastIndex.coerceAtLeast(0))
+    val state = rememberLazyListState(initialFirstVisibleItemIndex = initialIdx)
+    var centerIdx by remember { mutableIntStateOf(initialIdx) }
+    val latestSelected by rememberUpdatedState(selected)
+    val latestOnSelected by rememberUpdatedState(onSelected)
+    // The centered item = first visible index + half-viewport offset rounding (contentPadding
+    // is 2×item height and the viewport is 5×item height, so offset 0 puts item[first] centered).
+    LaunchedEffect(state, values) {
+        snapshotFlow {
+            (state.firstVisibleItemIndex + if (state.firstVisibleItemScrollOffset / itemPx >= 0.5f) 1 else 0)
+                .coerceIn(0, values.lastIndex)
+        }
+            .distinctUntilChanged()
+            .collect { idx ->
+                centerIdx = idx
+                values.getOrNull(idx)?.let { if (it != latestSelected) latestOnSelected(it) }
+            }
+    }
+    Box(modifier.fillMaxWidth().height(WheelItemHeight * 5)) {
+        // Center highlight band (behind the values).
+        Box(
+            Modifier
+                .align(Alignment.Center)
+                .fillMaxWidth()
+                .height(WheelItemHeight)
+                .background(dc.accent.copy(alpha = 0.08f), RoundedCornerShape(10.dp))
+        )
+        LazyColumn(
+            state = state,
+            modifier = Modifier.fillMaxSize(),
+            flingBehavior = rememberSnapFlingBehavior(lazyListState = state),
+            contentPadding = PaddingValues(vertical = WheelItemHeight * 2),
+        ) {
+            itemsIndexed(values) { idx, v ->
+                val isCenter = idx == centerIdx
+                Row(
+                    Modifier
+                        .height(WheelItemHeight)
+                        .fillMaxWidth()
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                            scope.launch { state.animateScrollToItem(idx) }
+                        },
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        format(v),
+                        fontSize = if (isCenter) 22.sp else 16.sp,
+                        fontWeight = if (isCenter) FontWeight.Bold else FontWeight.Medium,
+                        color = if (isCenter) dc.accentText else dc.labelGray,
+                    )
+                    // Fixed-width unit slot keeps every row's number perfectly centered; the
+                    // unit is only drawn beside the current value (no slot when there is none).
+                    Box(Modifier.width(if (unit.isEmpty()) 0.dp else 26.dp), contentAlignment = Alignment.CenterStart) {
+                        if (isCenter) Text(unit, fontSize = 12.sp, color = dc.slate)
+                    }
+                }
+            }
+        }
+        // Edge fades into the card background so the list dissolves instead of clipping.
+        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(WheelItemHeight * 1.2f).background(Brush.verticalGradient(listOf(dc.white, Color.Transparent))))
+        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(WheelItemHeight * 1.2f).background(Brush.verticalGradient(listOf(Color.Transparent, dc.white))))
+    }
+}
+
+
 
 /** Full-screen browse of "N年前的今天" photos, reached via 回忆时光机 → 去看看. */
 @OptIn(ExperimentalSharedTransitionApi::class)
