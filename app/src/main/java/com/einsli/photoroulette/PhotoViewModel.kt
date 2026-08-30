@@ -126,7 +126,8 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppUiState())
 
     init {
-        reload()
+        restoreSession()
+        reconcileQuietly()
         // Seed the lifetime counters from the current DB state on the first run after upgrade,
         // so existing installs don't start at zero. No-op afterwards.
         viewModelScope.launch {
@@ -163,7 +164,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
             if (cfg != null) {
                 try {
                     val r = repository.reconcile(cfg)
-                    Log.d(TAG, "reconcile: poolDeleted=${r.poolDeleted}, goneMarked=${r.goneMarked}, restored=${r.restoredCount}")
+                    Log.d(TAG, "reconcile: poolDeleted=${r.poolDeleted}, goneMarked=${r.goneMarked}, restored=${r.restoredCount}, livenessDead=${r.livenessDead}")
                     if (r.restoredCount > 0) settingsRepository.updateStatsCounters(0, -r.restoredCount)
                 } catch (e: Exception) {
                     Log.w(TAG, "reconcile failed, skipping this round", e)
@@ -180,16 +181,68 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         }
     }
 
-    /** 后台对账但不重建会话:首页点「开始整理」续用进行中的会话时进度不能打断,同步照样做。 */
+    /** 后台对账但不打断当前会话:首页点「继续整理」续用会话、或冷启动 restoreSession 之后
+     *  的补跑路径。对账若判定队列里有照片已被外部删除(gone),原位重算队列,位置尽量保留。 */
     fun reconcileQuietly() = viewModelScope.launch {
         val cfg = try { settingsRepository.settings.first() } catch (_: Exception) { null } ?: return@launch
+        val version = buildVersion
         try {
             val r = repository.reconcile(cfg)
-            Log.d(TAG, "quiet reconcile: poolDeleted=${r.poolDeleted}, goneMarked=${r.goneMarked}, restored=${r.restoredCount}")
+            Log.d(TAG, "quiet reconcile: poolDeleted=${r.poolDeleted}, goneMarked=${r.goneMarked}, restored=${r.restoredCount}, livenessDead=${r.livenessDead}")
             if (r.restoredCount > 0) settingsRepository.updateStatsCounters(0, -r.restoredCount)
+            if (r.poolDeleted > 0 || r.goneMarked > 0) resyncSession(version)
         } catch (e: Exception) {
             Log.w(TAG, "quiet reconcile failed", e)
         }
+    }
+
+    /** 对账后把当前会话队列里的死行(gone=1)剔除:保持剩余照片的相对顺序,当前位置优先
+     *  对准用户正在看的那张;同时把调整后的队列写回 DataStore,进程被杀后也能恢复正确状态。 */
+    private suspend fun resyncSession(version: Long) {
+        val cur = session.value ?: return
+        if (version != buildVersion) return  // 期间用户重建了会话,旧的对账结果不覆盖新队列
+        val ids = cur.queue.map { it.mediaId }
+        val live = repository.liveQueuePhotos(ids)
+        if (live.size == ids.size) return  // 队列照片没有受影响
+        val byId = live.associateBy { it.mediaId }
+        val newQueue = ids.mapNotNull { byId[it] }
+        val curId = cur.current?.mediaId
+        val newPos = curId?.let { id -> newQueue.indexOfFirst { it.mediaId == id } }?.takeIf { it >= 0 }
+            ?: cur.position.coerceAtMost(newQueue.size)
+        Log.d(TAG, "resync session: ${ids.size} -> ${newQueue.size} photos, position ${cur.position} -> $newPos")
+        session.value = cur.copy(queue = newQueue, position = newPos)
+        cardShownAt = SystemClock.elapsedRealtime()
+        repository.savePosition(newPos, newQueue.map { it.mediaId })
+    }
+
+    /** 冷启动/继续入口的快速路径:跳过对账,直接按存档队列(或按策略现取,均为毫秒级)把
+     *  会话恢复出来,首页/整理页即刻有内容;对账交给 [reconcileQuietly] 在后台补跑,若对账
+     *  判定队列里有照片已被外部删除,再由其内部 [resyncSession] 原位剔除(位置尽量不动)。 */
+    fun restoreSession() {
+        Log.d(TAG, "=== restoreSession() called ===")
+        undoStack.clear()
+        ghostPhotoId = 0L
+        ghostLockUntil = 0L
+        session.value = null
+        val version = ++buildVersion
+        viewModelScope.launch {
+            // 等 DataStore 的真实配置(仅建新队列时用到策略/范围;恢复存档队列用不上,但读取也就几毫秒)
+            val cfg = try { settingsRepository.settings.first() } catch (_: Exception) { null } ?: AppSettings()
+            val restored = repository.sessionQueue(cfg)
+            if (version == buildVersion) {
+                Log.d(TAG, "restore: publishing session $version with ${restored.queue.size} photos, position=${restored.position}")
+                session.value = ReviewSession(version, restored.queue, restored.position)
+                cardShownAt = SystemClock.elapsedRealtime()
+            } else {
+                Log.d(TAG, "restore: version mismatch ($version vs $buildVersion), discarding")
+            }
+        }
+    }
+
+    /** 首页「开始整理」(无进行中会话)与通知直达:立即出会话,同时对账后台补跑。 */
+    fun startSession() {
+        restoreSession()
+        reconcileQuietly()
     }
 
     fun action(mediaId: Long, state: PhotoState, dir: Int, userTouchedAt: Long): Boolean {

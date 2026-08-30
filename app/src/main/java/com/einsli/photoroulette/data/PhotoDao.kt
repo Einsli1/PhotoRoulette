@@ -11,12 +11,16 @@ interface PhotoDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(items: List<PhotoEntity>)
 
+    // Distinct album paths of the never-processed pool — the caller keeps only albums that pass
+    // the SAME prefix rule MediaScanner.scan uses, then deletes the rest via [deleteOutOfScope].
+    @Query("SELECT DISTINCT album FROM photos WHERE inTrash = 0 AND state IN ('UNSEEN', 'SKIP') AND album != ''")
+    suspend fun poolAlbums(): List<String>
+
     // Photos of deselected albums that were never processed: removed on rescan so the pool and
     // the total count reflect the album selection. Processed / trashed photos are kept, so the
     // organizing history and the trash can never be wiped by a selection change. [albums] must
-    // be non-empty; pass the album paths uppercased to match MediaScanner's case-insensitive
-    // album matching.
-    @Query("DELETE FROM photos WHERE inTrash = 0 AND state IN ('UNSEEN', 'SKIP') AND album != '' AND UPPER(album) NOT IN (:albums)")
+    // be non-empty; pass the out-of-scope album paths uppercased.
+    @Query("DELETE FROM photos WHERE inTrash = 0 AND state IN ('UNSEEN', 'SKIP') AND UPPER(album) IN (:albums)")
     suspend fun deleteOutOfScope(albums: List<String>)
 
     // Same idea for the 包含视频 toggle: when videos are turned OFF, drop unprocessed videos

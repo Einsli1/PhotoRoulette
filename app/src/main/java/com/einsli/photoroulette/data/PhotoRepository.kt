@@ -1,5 +1,6 @@
 package com.einsli.photoroulette.data
 
+import android.util.Log
 import com.einsli.photoroulette.media.MediaScanner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -9,7 +10,7 @@ data class SessionQueue(val position: Int, val queue: List<PhotoEntity>)
 
 /** One reconcile pass: rows removed from the never-processed pool, rows marked gone
  *  (processed, kept for history), trash photos the user restored in the system gallery. */
-data class ReconcileResult(val poolDeleted: Int, val goneMarked: Int, val restoredCount: Int)
+data class ReconcileResult(val poolDeleted: Int, val goneMarked: Int, val restoredCount: Int, val livenessDead: Int = 0)
 
 class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScanner, private val settings: SettingsRepository) {
     val processedCount: Flow<Int> = dao.processedCount()
@@ -47,9 +48,15 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
         // videos that predate the duration column also get their duration badge.
         scanned.filter { it.duration > 0 }.forEach { dao.backfillDuration(it.mediaId, it.duration) }
         // Drop unprocessed photos from albums that are no longer selected, so the total count
-        // tracks the album selection. Processed / trashed photos are left untouched.
+        // tracks the album selection. Processed / trashed photos are left untouched. The keep
+        // rule MUST stay in lockstep with MediaScanner.scan's filter (case-insensitive EXACT
+        // match, user-chosen semantics: 选了哪个目录就算哪个,父目录不自动包含子相册) — 当年
+        // scan 用前缀、清理用精确匹配,两边不一致让 451 张子目录照片每轮对账插了又删,首页
+        // 总数肉眼可见地来回跳。删除清单按 UPPER(album) 精确删。
         if (config.includedAlbums.isNotEmpty()) {
-            dao.deleteOutOfScope(config.includedAlbums.map { it.uppercase() })
+            val keep = config.includedAlbums.map { it.uppercase() }.toSet()
+            val outOfScope = dao.poolAlbums().filter { album -> album.uppercase() !in keep }
+            if (outOfScope.isNotEmpty()) dao.deleteOutOfScope(outOfScope.map { it.uppercase() })
         }
         // Drop unprocessed videos when 包含视频 is turned OFF, so the pool tracks the toggle.
         if (!config.includeVideos) {
@@ -68,10 +75,25 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
      */
     suspend fun reconcile(config: AppSettings): ReconcileResult = withContext(Dispatchers.IO) {
         val scanned = upsertFromScan(config)
-        val existing = scanner.scanExistingIds()
+        val snap = scanner.scanExisting()
+        Log.d("Reconcile", "scanned=${scanned.size} existing=${snap.existing.size} trashed=${snap.trashed.size}")
         // 同一轮扫描有结果而存在性查询为空,说明后者出了问题:宁可不对账也不批量误删。
-        if (existing.isEmpty() && scanned.isNotEmpty()) error("existence query empty while scan found ${scanned.size} rows")
-        val dead = dao.activeIds().filter { it !in existing }
+        if (snap.existing.isEmpty() && scanned.isNotEmpty()) error("existence query empty while scan found ${scanned.size} rows")
+        val active = dao.activeIds()
+        val activeSet = active.toHashSet()
+        // 1) id 已不在 MediaStore:AOSP 上「彻底删除」连行一起删,这一步就能抓到。
+        val dead = active.filter { it !in snap.existing }.toMutableList()
+        // 2) 行还挂在 MediaStore(is_trashed=1)但文件已打不开:HyperOS/MIUI 在系统相册回收站
+        //    「永久删除」只删文件,provider 行残留到 30 天过期清扫,纯 id 比对永远判不出
+        //    (真机实测 goneMarked 恒 0)。对这批行做文件活性探测,FileNotFoundException 才算死,
+        //    其余异常按「还活着」处理——探测绝不能造成误删。
+        var livenessDead = 0
+        for (id in snap.trashed) {
+            if (id !in activeSet) continue
+            if (scanner.isFileReadable(id)) continue
+            dead.add(id)
+            livenessDead++
+        }
         var poolDeleted = 0
         var goneMarked = 0
         // 分块避开 SQLite IN 参数上限;deleteDeadPool 先行,markGone 只会命中余下的已处理行。
@@ -83,7 +105,7 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
         for (chunk in dao.trashIds().filter { it in scanIds }.chunked(900)) {
             restoredCount += dao.syncExternallyRestored(chunk)
         }
-        ReconcileResult(poolDeleted, goneMarked, restoredCount)
+        ReconcileResult(poolDeleted, goneMarked, restoredCount, livenessDead)
     }
 
     suspend fun listAlbums(includeVideos: Boolean = false): List<String> = scanner.listAlbums(includeVideos)
@@ -108,6 +130,8 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
         return SessionQueue(0, photos)
     }
     suspend fun savePosition(position: Int, queueIds: List<Long>) = settings.saveQueue(queueIds, position)
+    /** 会话队列原位重算用:按 id 取仍然存在的行(gone=0),顺序由调用方自己保持。 */
+    suspend fun liveQueuePhotos(ids: List<Long>): List<PhotoEntity> = dao.byIds(ids)
     suspend fun apply(photo: PhotoEntity, state: PhotoState) = dao.updateState(photo.mediaId, state, if (state == PhotoState.SKIP) null else System.currentTimeMillis())
     suspend fun startNextSession() = settings.clearQueue()
     suspend fun pendingDeletes(): List<PhotoEntity> = dao.pendingDeletes()
