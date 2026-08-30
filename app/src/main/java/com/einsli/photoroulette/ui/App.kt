@@ -17,6 +17,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,6 +45,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
@@ -88,6 +90,7 @@ import androidx.compose.foundation.shape.CircleShape
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.snapshotFlow
 import com.einsli.photoroulette.AppUiState
@@ -417,7 +420,11 @@ private fun TrashPageBackdrop(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             userScrollEnabled = false,
         ) {
-            itemsIndexed(items) { _, photo ->
+            itemsIndexed(
+                items,
+                key = { _, photo -> photo.mediaId },
+                contentType = { _, photo -> if (photo.mimeType.startsWith("video/")) "video" else "image" },
+            ) { _, photo ->
                 val checked = selected.contains(photo.mediaId)
                 Box(
                     Modifier
@@ -549,7 +556,10 @@ private fun MemoryPageBackdrop(
     val gridCellPx = with(LocalDensity.current) {
         (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
     }
-    val gridThumbSize = remember(gridCellPx) { CoilSize(gridCellPx, gridCellPx) }
+    // 缩略图解码尺寸 = 显示像素的 70%（400→280px）：解码快 ~2 倍、单张内存省一半，
+    // 配合扩容后的内存缓存（见 PhotoRouletteApp，35%→40%）仍可全量常驻内存。
+    val thumbPx = remember(gridCellPx) { (gridCellPx * 0.7f).roundToInt() }
+    val gridThumbSize = remember(thumbPx) { CoilSize(thumbPx, thumbPx) }
     // One grid row = cell + vertical spacing (8dp); approximates the scroll offset from the
     // first visible item's index, used by the spring pull's limit detection.
     val localDensity = LocalDensity.current
@@ -584,15 +594,11 @@ private fun MemoryPageBackdrop(
         }
         // Batch 1: the first ~3 viewports (≈ 40 cells) immediately on entry.
         enqueueUntil(40)
-        // Then advance the frontier as the user scrolls: always ~1.5 viewports ahead and keep
-        // ~1 viewport behind for upward scrolls.
-        snapshotFlow {
-            val info = gridState.layoutInfo
-            val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            first to last
-        }.collect { (first, _) ->
-            enqueueUntil(first + 54)
+        // 然后把整份列表分小批铺进内存（每批 12 张、批间 50ms，可见区域的请求可以在批间
+        // 插队）：几百张在几秒内全部常驻内存缓存，之后滑动全部命中缓存、零解码。
+        while (frontier < items.size) {
+            enqueueUntil(minOf(frontier + 12, items.size))
+            delay(50)
         }
     }
     PhotoSharedTransitionLayout {
@@ -667,6 +673,7 @@ private fun MemoryPageBackdrop(
                             if (items.isEmpty()) {
                                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("回收站为空") }
                             } else {
+                                Box(Modifier.fillMaxSize()) {
                                 LazyVerticalGrid(
                                     state = gridState,
                                     columns = GridCells.Fixed(3),
@@ -675,7 +682,11 @@ private fun MemoryPageBackdrop(
                                     verticalArrangement = Arrangement.spacedBy(8.dp),
                                     flingBehavior = rememberGentleFlingBehavior()
                                 ) {
-                                    itemsIndexed(items) { index, photo ->
+                                    itemsIndexed(
+                                        items,
+                                        key = { _, photo -> photo.mediaId },
+                                        contentType = { _, photo -> if (photo.mimeType.startsWith("video/")) "video" else "image" },
+                                    ) { index, photo ->
                                         val checked = selected.contains(photo.mediaId)
                                         // Live copy of `checked`: pointerInput does NOT restart when
                                         // selection changes, so the long-press handler must read the
@@ -685,7 +696,6 @@ private fun MemoryPageBackdrop(
                                             Modifier
                                                 .aspectRatio(1f)
                                                 .clip(RoundedCornerShape(8.dp))
-                                                .background(MaterialTheme.colorScheme.surfaceVariant)
                                                 .pointerInput(photo.mediaId) {
                                                     detectTapGestures(
                                                         onTap = {
@@ -717,6 +727,8 @@ private fun MemoryPageBackdrop(
                                             }
                                         }
                                     }
+                                }
+                                TrashScrollbar(gridState, items.size, Modifier.align(Alignment.CenterEnd))
                                 }
                             }
                         }
@@ -772,6 +784,68 @@ private fun MemoryPageBackdrop(
                 }
             }
         }
+    }
+}
+
+/** 回收站宫格右侧的快速滚动条：细轨道 + 可拖拽圆头拇指，拖动直接跳转到对应位置。 */
+@Composable
+private fun TrashScrollbar(gridState: LazyGridState, totalItems: Int, modifier: Modifier = Modifier) {
+    if (totalItems < 24) return
+    val dc = designColors()
+    val scope = rememberCoroutineScope()
+    var dragging by remember { mutableStateOf(false) }
+    var trackHeightPx by remember { mutableIntStateOf(0) }
+    // 每帧读取滚动位置只会重组这个小工具，宫格本身不受影响。
+    val info = gridState.layoutInfo
+    val total = info.totalItemsCount.coerceAtLeast(1)
+    val visible = info.visibleItemsInfo
+    val first = visible.firstOrNull()?.index ?: 0
+    val span = ((visible.lastOrNull()?.index ?: first) - first + 1).coerceAtLeast(1)
+    val denom = (total - span).coerceAtLeast(1)
+    val frac = (first.toFloat() / denom).coerceIn(0f, 1f)
+    val density = LocalDensity.current
+    val thumbHeightPx = maxOf(with(density) { 48.dp.toPx() }, trackHeightPx * (span.toFloat() / total))
+    val travelPx = (trackHeightPx - thumbHeightPx).coerceAtLeast(0f)
+    val thumbHeightDp = with(density) { thumbHeightPx.toDp() }
+    fun scrollToFraction(f: Float) {
+        val target = (f.coerceIn(0f, 1f) * denom).roundToInt().coerceIn(0, total - 1)
+        scope.launch { gridState.scrollToItem(target) }
+    }
+    Box(
+        modifier
+            .width(26.dp)
+            .fillMaxHeight()
+            .onSizeChanged { trackHeightPx = it.height }
+            .pointerInput(total) {
+                detectVerticalDragGestures(
+                    onDragStart = {
+                        dragging = true
+                        scrollToFraction(it.y / trackHeightPx.coerceAtLeast(1))
+                    },
+                    onDragEnd = { dragging = false },
+                    onDragCancel = { dragging = false },
+                    onVerticalDrag = { change, _ ->
+                        change.consume()
+                        scrollToFraction(change.position.y / trackHeightPx.coerceAtLeast(1))
+                    },
+                )
+            },
+    ) {
+        Box(
+            Modifier
+                .align(Alignment.CenterEnd)
+                .width(4.dp)
+                .fillMaxHeight(0.92f)
+                .background(dc.track.copy(alpha = 0.5f), CircleShape)
+        )
+        Box(
+            Modifier
+                .align(Alignment.TopEnd)
+                .offset { IntOffset(0, (frac * travelPx).roundToInt()) }
+                .width(5.dp)
+                .height(thumbHeightDp)
+                .background(if (dragging) dc.accent else dc.accent.copy(alpha = 0.55f), CircleShape)
+        )
     }
 }
 

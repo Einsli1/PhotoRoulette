@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.compose.rememberAsyncImagePainter
+import coil.decode.DataSource
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
@@ -176,17 +177,24 @@ fun SharedTransitionScope.SharedGridImage(
     // Resting thumbnail: fixed cell-size request (when [gridSize] is provided) so grid scrolling
     // decodes only the small bitmap and hits a stable memory-cache entry. Fades in on success.
     val thumbRequest = remember(photo.uri, gridSize) { photoThumbRequest(context, photo, gridSize) }
+    // thumbSnap: 内存缓存命中的位图直接全显、不做淡入。快速滑动时预加载让绝大多数新格子
+    // 命中缓存，若每格都跑 180ms 的 alpha 淡入（附带离屏合成层），逐帧重组+渲染开销是
+    // 滑动掉帧的主因之一；只有真正需要解码的格子才淡入。
     var thumbReady by remember(photo.uri, gridSize) { mutableStateOf(false) }
+    var thumbSnap by remember(photo.uri, gridSize) { mutableStateOf(false) }
     val thumbPainter = rememberAsyncImagePainter(
         thumbRequest,
-        onSuccess = { thumbReady = true },
+        onSuccess = { state ->
+            thumbReady = true
+            thumbSnap = state.result.dataSource == DataSource.MEMORY_CACHE
+        },
         contentScale = contentScale,
     )
-    val thumbAlpha by animateFloatAsState(
+    val thumbAlpha = if (thumbSnap) 1f else animateFloatAsState(
         targetValue = if (thumbReady) 1f else 0f,
         animationSpec = tween(180),
         label = "thumbAlpha",
-    )
+    ).value
     Box(
         modifier
             .sharedElement(
@@ -196,6 +204,10 @@ fun SharedTransitionScope.SharedGridImage(
             )
             .clip(RoundedCornerShape(animatedRadius))
     ) {
+        // 占位底色：仅在缩略图未就绪时绘制。已加载的格子不再多画一层背景，减少过度绘制。
+        if (!thumbReady) {
+            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant))
+        }
         // Fit copy: only composed for the returning cell while the return transition runs
         // (morph < 1). It uses the same fixed screen-size request as the preview, so it hits the
         // preview's memory-cache entry immediately instead of re-decoding. At rest it is not

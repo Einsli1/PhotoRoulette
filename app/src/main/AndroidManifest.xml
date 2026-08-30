@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <application android:allowBackup="true" android:label="照片轮盘" android:theme="@style/Theme.PhotoRoulette" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:enableOnBackInvokedCallback="true">
+    <application android:name=".PhotoRouletteApp" android:largeHeap="true" android:allowBackup="true" android:label="照片轮盘" android:theme="@style/Theme.PhotoRoulette" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:enableOnBackInvokedCallback="true">
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
