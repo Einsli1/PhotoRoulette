@@ -165,8 +165,14 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
         Scaffold(
             containerColor = dc.pageBg,
             bottomBar = {
-                // Review (2) and MemoryViewer (5) are immersive: no bottom navigation.
-                if (page !in immersivePages) {
+                // Review (2) and MemoryViewer (5) are immersive: no bottom navigation. The slot
+                // must keep its 85dp height there too (transparent spacer): dropping the bar
+                // re-issues smaller Scaffold padding in the SAME frame, the still-visible page's
+                // viewport grows, its scroll state clamps (max drops) and the whole content
+                // visibly jumps down right as the zoom cover starts (设置页跳一下).
+                if (page in immersivePages) {
+                    Spacer(Modifier.height(85.dp))
+                } else {
                     // Slightly slimmer than the 80dp default so the content area stays roomy,
                     // but tall enough that the icons and labels never clip.
                     NavigationBar(

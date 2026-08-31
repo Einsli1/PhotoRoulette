@@ -347,7 +347,9 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     fun setPhotoRange(v: String) = viewModelScope.launch { settingsRepository.save(settings.value.copy(photoRange = v)) }
     fun setCustomRangeStart(v: Long) = viewModelScope.launch { settingsRepository.save(settings.value.copy(photoRange = "custom", customRangeStart = v)) }
     fun setStrategy(v: String) = viewModelScope.launch { settingsRepository.save(settings.value.copy(strategy = v)) }
-    fun nextSession() = viewModelScope.launch { Log.d(TAG, "nextSession() starting"); repository.startNextSession(); Log.d(TAG, "nextSession() calling reload"); reload() }
+    /** 处理删除并继续整理:清掉存档队列后立即建下一批(刚删的这批 confirmDeleted 已标
+     *  inTrash=1,建队列 SQL 本来就排除,不用等对账),对账照旧后台补跑。 */
+    fun nextSession() = viewModelScope.launch { Log.d(TAG, "nextSession() starting"); repository.startNextSession(); Log.d(TAG, "nextSession() calling startSession"); startSession() }
     suspend fun pendingDeletes() = repository.pendingDeletes()
     fun confirmDeleted(ids: List<Long>) = viewModelScope.launch { Log.d(TAG, "confirmDeleted(${ids.size} photos)"); repository.confirmDeleted(ids) }
     suspend fun trashList(): List<PhotoEntity> = repository.trashList()
