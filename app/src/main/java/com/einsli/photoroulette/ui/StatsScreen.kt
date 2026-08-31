@@ -212,14 +212,16 @@ fun StatsScreen(state: AppUiState) {
     }
 }
 
-/** Simple Material-3 style bar chart: last 7 days, oldest first, today highlighted.
- *  The plot area (bars) has a fixed height and the weekday labels sit on a fixed baseline,
- *  so tall bars never push the labels down. */
+/** Simple Material-3 style bar chart: this calendar week, Monday first, today highlighted,
+ *  days that have not arrived yet show an empty slot (label only). The plot area (bars) has
+ *  a fixed height and the weekday labels sit on a fixed baseline, so tall bars never push
+ *  the labels down. */
 @Composable
 private fun WeekTrendChart(days: List<Int>) {
     val dc = designColors()
     val maxCount = (days.maxOrNull() ?: 0).coerceAtLeast(1)
     val today = LocalDate.now()
+    val monday = today.with(DayOfWeek.MONDAY)
     Column(Modifier.fillMaxWidth()) {
         // Fixed-height plot area: value labels + bars, bottom-aligned.
         Row(
@@ -228,8 +230,9 @@ private fun WeekTrendChart(days: List<Int>) {
             verticalAlignment = Alignment.Bottom
         ) {
             days.forEachIndexed { i, count ->
-                val d = today.minusDays((6 - i).toLong())
-                val isToday = i == days.size - 1
+                val d = monday.plusDays(i.toLong())
+                val isToday = d == today
+                val isFuture = d.isAfter(today)
                 val barHeight = if (count > 0) {
                     (56.dp * (count.toFloat() / maxCount)).coerceAtLeast(3.dp)
                 } else 0.dp
@@ -238,7 +241,9 @@ private fun WeekTrendChart(days: List<Int>) {
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Spacer(Modifier.weight(1f))
-                    Text("$count", fontSize = 9.sp, color = if (isToday) dc.accentText else dc.labelGray)
+                    if (!isFuture) {
+                        Text("$count", fontSize = 9.sp, color = if (isToday) dc.accentText else dc.labelGray)
+                    }
                     Spacer(Modifier.height(2.dp))
                     Box(
                         Modifier
@@ -257,8 +262,8 @@ private fun WeekTrendChart(days: List<Int>) {
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             days.forEachIndexed { i, _ ->
-                val d = today.minusDays((6 - i).toLong())
-                val isToday = i == days.size - 1
+                val d = monday.plusDays(i.toLong())
+                val isToday = d == today
                 Text(
                     weekdayLabel(d.dayOfWeek),
                     fontSize = 10.sp,

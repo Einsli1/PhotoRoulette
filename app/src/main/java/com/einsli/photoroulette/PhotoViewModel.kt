@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.einsli.photoroulette.data.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -102,17 +103,18 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     ) { kept, streak, bytes, memory ->
         HomeStats(kept, streak, bytes, memory)
     }
-    // Rolling 7-day window (today + previous 6 days) for the stats trend.
-    private val weekSince = System.currentTimeMillis() - 6L * 24 * 3600 * 1000
+    // 「本周整理」用自然周窗口:本周一 00:00 起,与图表的 周一..周日 七个固定槽位一一对应。
+    private val weekSince: Long
+        get() = LocalDate.now().with(DayOfWeek.MONDAY).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
     private val weekStats = combine(
         repository.dayCountsSince(weekSince),
         repository.weekKept(weekSince),
         repository.weekFreedBytes(weekSince)
     ) { dayCounts, kept, freed ->
         val byDay = dayCounts.associate { it.day to it.cnt }
-        val today = LocalDate.now()
-        val days = (6 downTo 0).map { offset ->
-            byDay[today.minusDays(offset.toLong()).toString()] ?: 0
+        val monday = LocalDate.now().with(DayOfWeek.MONDAY)
+        val days = (0 until 7).map { offset ->
+            byDay[monday.plusDays(offset.toLong()).toString()] ?: 0
         }
         WeekStats(days, days.sum(), kept, freed)
     }
