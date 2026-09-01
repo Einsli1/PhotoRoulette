@@ -140,15 +140,21 @@ interface PhotoDao {
     // ── weekly stats ──
     data class DayCount(val day: String, val cnt: Int)
 
-    @Query("SELECT substr(date(processedAt / 1000, 'unixepoch', 'localtime'), 1, 10) AS day, COUNT(*) AS cnt FROM photos WHERE processedAt IS NOT NULL AND processedAt >= :since GROUP BY day ORDER BY day")
-    fun dayCountsSince(since: Long): Flow<List<DayCount>>
+    // [start, end) window — the current week passes next Monday as :end, so any historical
+    // week can reuse the same three queries (历史整理也是按周切换的).
+    @Query("SELECT substr(date(processedAt / 1000, 'unixepoch', 'localtime'), 1, 10) AS day, COUNT(*) AS cnt FROM photos WHERE processedAt IS NOT NULL AND processedAt >= :start AND processedAt < :end GROUP BY day ORDER BY day")
+    fun dayCountsBetween(start: Long, end: Long): Flow<List<DayCount>>
 
-    @Query("SELECT COUNT(*) FROM photos WHERE state = 'KEEP' AND processedAt >= :since")
-    fun weekKept(since: Long): Flow<Int>
+    @Query("SELECT COUNT(*) FROM photos WHERE state = 'KEEP' AND processedAt >= :start AND processedAt < :end")
+    fun weekKeptBetween(start: Long, end: Long): Flow<Int>
 
     // Photos processed in the window that were not kept went to the trash — those bytes are "freed".
-    @Query("SELECT COALESCE(SUM(size), 0) FROM photos WHERE processedAt >= :since AND processedAt IS NOT NULL AND state != 'KEEP'")
-    fun weekFreedBytes(since: Long): Flow<Long>
+    @Query("SELECT COALESCE(SUM(size), 0) FROM photos WHERE processedAt >= :start AND processedAt < :end AND processedAt IS NOT NULL AND state != 'KEEP'")
+    fun weekFreedBytesBetween(start: Long, end: Long): Flow<Long>
+
+    // Oldest processed timestamp — the history picker's year wheel starts here.
+    @Query("SELECT MIN(processedAt) FROM photos WHERE processedAt IS NOT NULL")
+    suspend fun earliestProcessedAt(): Long?
 
     @Query("DELETE FROM photos")
     suspend fun clear()

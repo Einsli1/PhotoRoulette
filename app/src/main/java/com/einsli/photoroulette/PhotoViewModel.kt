@@ -6,11 +6,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.einsli.photoroulette.data.*
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
+import java.time.YearMonth
 import java.time.ZoneId
 
 data class ReviewSession(
@@ -103,20 +105,58 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     ) { kept, streak, bytes, memory ->
         HomeStats(kept, streak, bytes, memory)
     }
-    // 「本周整理」用自然周窗口:本周一 00:00 起,与图表的 周一..周日 七个固定槽位一一对应。
-    private val weekSince: Long
-        get() = LocalDate.now().with(DayOfWeek.MONDAY).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-    private val weekStats = combine(
-        repository.dayCountsSince(weekSince),
-        repository.weekKept(weekSince),
-        repository.weekFreedBytes(weekSince)
-    ) { dayCounts, kept, freed ->
-        val byDay = dayCounts.associate { it.day to it.cnt }
-        val monday = LocalDate.now().with(DayOfWeek.MONDAY)
-        val days = (0 until 7).map { offset ->
-            byDay[monday.plusDays(offset.toLong()).toString()] ?: 0
+    // ── 周统计:任意一周(周一..周日)的 7 天趋势 + 汇总。「本周整理」与「历史整理」
+    //    共用同一套窗口查询——历史记录也是按周显示和切换的。 ──
+    private fun weekStatsFlow(monday: LocalDate): Flow<WeekStats> {
+        val zone = ZoneId.systemDefault()
+        val start = monday.atStartOfDay(zone).toInstant().toEpochMilli()
+        val end = monday.plusDays(7).atStartOfDay(zone).toInstant().toEpochMilli()
+        return combine(
+            repository.dayCountsBetween(start, end),
+            repository.weekKeptBetween(start, end),
+            repository.weekFreedBytesBetween(start, end)
+        ) { dayCounts, kept, freed ->
+            val byDay = dayCounts.associate { it.day to it.cnt }
+            val days = (0 until 7).map { offset ->
+                byDay[monday.plusDays(offset.toLong()).toString()] ?: 0
+            }
+            WeekStats(days, days.sum(), kept, freed)
         }
-        WeekStats(days, days.sum(), kept, freed)
+    }
+    // 「本周整理」用自然周窗口:本周一 00:00 起,与图表的 周一..周日 七个固定槽位一一对应。
+    private val weekStats = weekStatsFlow(LocalDate.now().with(DayOfWeek.MONDAY))
+    // ── 历史整理:统计页选中查看的某一周(null = 未选,仍显示本周),存该周的周一 ──
+    private val selectedWeek = MutableStateFlow<LocalDate?>(null)
+    val historyWeek: StateFlow<LocalDate?> = selectedWeek.asStateFlow()
+    fun selectHistoryWeek(weekMonday: LocalDate?) { selectedWeek.value = weekMonday }
+    // 切换周即换窗口重新订阅;WhileSubscribed 让它只在统计页可见时跑。
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val historyWeekStats: StateFlow<WeekStats?> = selectedWeek
+        .flatMapLatest { monday ->
+            if (monday == null) flowOf(null) else weekStatsFlow(monday)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    // 历史月历的起始月 = 最早的 processedAt 月份。processedAt 只会是"现在",下限不会变,
+    // 进程内缓存即可;重置整理记录(reset)后失效重查。
+    @Volatile private var minHistoryMonthCache: YearMonth? = null
+    suspend fun earliestHistoryMonth(): YearMonth {
+        minHistoryMonthCache?.let { return it }
+        val now = YearMonth.now()
+        val m = repository.earliestProcessedAt()
+            ?.let { Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()) }
+            ?.let { YearMonth.from(it) }
+            ?: now
+        return m.coerceAtMost(now).also { minHistoryMonthCache = it }
+    }
+
+    /** 某个月每一天的整理量(统计页月历用),缺勤日不在 map 里。 */
+    suspend fun monthDayCounts(month: YearMonth): Map<LocalDate, Int> {
+        val zone = ZoneId.systemDefault()
+        val start = month.atDay(1).atStartOfDay(zone).toInstant().toEpochMilli()
+        val end = month.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant().toEpochMilli()
+        return repository.dayCountsBetween(start, end)
+            .first()
+            .associate { LocalDate.parse(it.day) to it.cnt }
     }
     // combine() only has typed overloads up to 5 flows; merge the counters in a second stage.
     val ui = combine(
@@ -365,7 +405,12 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         settingsRepository.updateStatsCounters(0, -ids.size)
     }
     fun deleteFromTrash(ids: List<Long>) = viewModelScope.launch { repository.deleteFromTrash(ids) }
-    fun reset() = viewModelScope.launch { repository.reset(); settingsRepository.resetStatsCounters(); reload() }
+    fun reset() = viewModelScope.launch {
+        repository.reset(); settingsRepository.resetStatsCounters()
+        minHistoryMonthCache = null // 整理记录清空后,月历的起始月要重查
+        selectedWeek.value = null   // 回到本周视图
+        reload()
+    }
 
     // ── home-screen stats helpers ────────────────────────────────────────────
 

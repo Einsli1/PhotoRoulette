@@ -20,9 +20,10 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
     val trashBytes: Flow<Long> = dao.trashBytes()
     val memoryCandidates: Flow<List<PhotoEntity>> = dao.memoryCandidates()
 
-    fun dayCountsSince(since: Long): Flow<List<PhotoDao.DayCount>> = dao.dayCountsSince(since)
-    fun weekKept(since: Long): Flow<Int> = dao.weekKept(since)
-    fun weekFreedBytes(since: Long): Flow<Long> = dao.weekFreedBytes(since)
+    fun dayCountsBetween(start: Long, end: Long): Flow<List<PhotoDao.DayCount>> = dao.dayCountsBetween(start, end)
+    fun weekKeptBetween(start: Long, end: Long): Flow<Int> = dao.weekKeptBetween(start, end)
+    fun weekFreedBytesBetween(start: Long, end: Long): Flow<Long> = dao.weekFreedBytesBetween(start, end)
+    suspend fun earliestProcessedAt(): Long? = dao.earliestProcessedAt()
 
     /** Resolve the [AppSettings.photoRange] into a [dateTaken] window (inclusive min, exclusive max). */
     private fun dateRange(config: AppSettings): Pair<Long?, Long?> {

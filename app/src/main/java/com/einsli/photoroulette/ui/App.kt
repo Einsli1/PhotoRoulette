@@ -319,7 +319,19 @@ private fun PageContent(
         }, onScan = onScan, onOpenMemory = { onNavigate(5) })
         1 -> Settings(state.settings, viewModel, scrollState = settingsScroll, savedScroll = savedSettingsScroll, openTrash = { onNavigate(3) })
         3 -> RecycleBin(trashItems, viewModel, onRestore = onRestoreFromTrash, onBack = { onNavigate(1) })
-        4 -> StatsScreen(state)
+        4 -> {
+            // 历史整理:按周显示和切换,选中历史日期即查看它所在的一周。
+            val historyWeek by viewModel.historyWeek.collectAsStateWithLifecycle()
+            val historyWeekStats by viewModel.historyWeekStats.collectAsStateWithLifecycle()
+            StatsScreen(
+                state,
+                historyWeek = historyWeek,
+                historyWeekStats = historyWeekStats,
+                onSelectHistoryWeek = viewModel::selectHistoryWeek,
+                earliestMonth = viewModel::earliestHistoryMonth,
+                monthDayCounts = viewModel::monthDayCounts,
+            )
+        }
         5 -> MemoryViewer(state.stats.memory, onBack = { onNavigate(0) })
         else -> {
             val session by viewModel.sessionFlow.collectAsStateWithLifecycle(initialValue = viewModel.sessionFlow.value)
@@ -1538,132 +1550,6 @@ private fun <T> SettingOptionPicker(
     }
 }
 
-/** Pill trigger + floating picker card shared by the wheel-based settings. Owns the open/close
- *  state and the two-way scale/fade animation (grows from the pill corner, shrinks back on
- *  dismiss) and positions the popup just below the pill (end-aligned), flipping above when
- *  there is no room below. [content] goes between the title and the "完成" confirm button.
- *  不能用 DropdownMenu：它测弹窗尺寸时会查询 intrinsic measurements，而 LazyColumn
- *  (SubcomposeLayout) 不支持 intrinsic → 打开即崩。普通 Popup 自行定位。 */
-@Composable
-private fun SettingPopupPicker(
-    label: String,
-    title: String? = null,
-    cardWidth: Dp = 248.dp,
-    showConfirm: Boolean = true,
-    content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
-) {
-    val dc = designColors()
-    var expanded by remember { mutableStateOf(false) }
-    var closing by remember { mutableStateOf(false) }
-    fun closePicker() { if (!closing) closing = true }
-    // 两段式开关：收起时先播动画（closing=true，popup 保持组合），结束后才真正移除。
-    val progress = remember { Animatable(0f) }
-    LaunchedEffect(expanded, closing) {
-        when {
-            expanded && !closing -> progress.animateTo(1f, tween(200, easing = FastOutSlowInEasing))
-            closing -> {
-                progress.animateTo(0f, tween(150, easing = FastOutSlowInEasing))
-                expanded = false
-                closing = false
-            }
-        }
-    }
-    Box {
-        Row(
-            Modifier
-                .clip(RoundedCornerShape(10.dp))
-                .background(if (expanded && !closing) dc.accent.copy(alpha = 0.14f) else dc.white)
-                .clickable {
-                    if (expanded && !closing) closePicker() else { closing = false; expanded = true }
-                }
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = dc.accentText)
-            Spacer(Modifier.width(4.dp))
-            Icon(Icons.Default.ArrowDropDown, null, tint = dc.labelGray, modifier = Modifier.size(18.dp))
-        }
-        val gapPx = with(LocalDensity.current) { 8.dp.toPx() }.roundToInt()
-        val marginPx = with(LocalDensity.current) { 12.dp.toPx() }.roundToInt()
-        val popupPosition = remember(gapPx, marginPx) {
-            object : PopupPositionProvider {
-                override fun calculatePosition(
-                    anchorBounds: IntRect,
-                    windowSize: IntSize,
-                    layoutDirection: LayoutDirection,
-                    popupContentSize: IntSize,
-                ): IntOffset {
-                    val x = (anchorBounds.right - popupContentSize.width)
-                        .coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
-                    var y = anchorBounds.bottom + gapPx
-                    if (y + popupContentSize.height > windowSize.height - marginPx) {
-                        y = anchorBounds.top - popupContentSize.height - gapPx
-                    }
-                    y = y.coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
-                    return IntOffset(x, y)
-                }
-            }
-        }
-        if (expanded || closing) {
-            Popup(
-                popupPositionProvider = popupPosition,
-                onDismissRequest = { closePicker() },
-                properties = PopupProperties(focusable = true),
-            ) {
-                Box(
-                    Modifier
-                        .padding(4.dp)
-                        .graphicsLayer {
-                            // 从药丸方向（右上角）缩放展开/收回，配合透明度。
-                            val p = progress.value
-                            alpha = p
-                            scaleX = 0.85f + 0.15f * p
-                            scaleY = 0.85f + 0.15f * p
-                            transformOrigin = TransformOrigin(1f, 0f)
-                        },
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = dc.white,
-                        shadowElevation = 8.dp,
-                    ) {
-                        Column(
-                            Modifier
-                                .then(if (cardWidth > 0.dp) Modifier.width(cardWidth) else Modifier.widthIn(min = 88.dp))
-                                .padding(start = 8.dp, end = 8.dp, bottom = if (showConfirm) 14.dp else 6.dp)
-                        ) {
-                            if (title == null) {
-                                Spacer(Modifier.height(4.dp))
-                            } else {
-                                Spacer(Modifier.height(14.dp))
-                                Text(
-                                    title,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = dc.labelGray,
-                                    textAlign = TextAlign.Center,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                                Spacer(Modifier.height(8.dp))
-                            }
-                            content { closePicker() }
-                            if (showConfirm) {
-                                Spacer(Modifier.height(12.dp))
-                                Button(
-                                    onClick = { closePicker() },
-                                    Modifier.fillMaxWidth().height(40.dp),
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = dc.accent, contentColor = Color.White),
-                                ) { Text("完成", fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 /** 每次整理数量：单滚轮（悬浮卡片内）。 */
 @Composable
 private fun SettingValueWheel(
@@ -1712,90 +1598,6 @@ private fun SettingTimeWheel(
         }
     }
 }
-
-private val WheelItemHeight = 34.dp
-
-/** Custom snap-scrolling number wheel: the centered row is the selection — big bold accent
- *  value with the unit beside it, neighbours in gray, a soft accent band behind the center and
- *  gradient fades at the edges. Tapping a neighbour animates it to the center. */
-@Composable
-private fun StyledNumberWheel(
-    values: List<Int>,
-    selected: Int,
-    unit: String,
-    format: (Int) -> String = { it.toString() },
-    onSelected: (Int) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val dc = designColors()
-    val scope = rememberCoroutineScope()
-    val itemPx = with(LocalDensity.current) { WheelItemHeight.toPx() }
-    val initialIdx = values.indexOf(selected).coerceIn(0, values.lastIndex.coerceAtLeast(0))
-    val state = rememberLazyListState(initialFirstVisibleItemIndex = initialIdx)
-    var centerIdx by remember { mutableIntStateOf(initialIdx) }
-    val latestSelected by rememberUpdatedState(selected)
-    val latestOnSelected by rememberUpdatedState(onSelected)
-    // The centered item = first visible index + half-viewport offset rounding (contentPadding
-    // is 2×item height and the viewport is 5×item height, so offset 0 puts item[first] centered).
-    LaunchedEffect(state, values) {
-        snapshotFlow {
-            (state.firstVisibleItemIndex + if (state.firstVisibleItemScrollOffset / itemPx >= 0.5f) 1 else 0)
-                .coerceIn(0, values.lastIndex)
-        }
-            .distinctUntilChanged()
-            .collect { idx ->
-                centerIdx = idx
-                values.getOrNull(idx)?.let { if (it != latestSelected) latestOnSelected(it) }
-            }
-    }
-    Box(modifier.fillMaxWidth().height(WheelItemHeight * 5)) {
-        // Center highlight band (behind the values).
-        Box(
-            Modifier
-                .align(Alignment.Center)
-                .fillMaxWidth()
-                .height(WheelItemHeight)
-                .background(dc.accent.copy(alpha = 0.08f), RoundedCornerShape(10.dp))
-        )
-        LazyColumn(
-            state = state,
-            modifier = Modifier.fillMaxSize(),
-            flingBehavior = rememberSnapFlingBehavior(lazyListState = state),
-            contentPadding = PaddingValues(vertical = WheelItemHeight * 2),
-        ) {
-            itemsIndexed(values) { idx, v ->
-                val isCenter = idx == centerIdx
-                Row(
-                    Modifier
-                        .height(WheelItemHeight)
-                        .fillMaxWidth()
-                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                            scope.launch { state.animateScrollToItem(idx) }
-                        },
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        format(v),
-                        fontSize = if (isCenter) 22.sp else 16.sp,
-                        fontWeight = if (isCenter) FontWeight.Bold else FontWeight.Medium,
-                        color = if (isCenter) dc.accentText else dc.labelGray,
-                    )
-                    // Fixed-width unit slot keeps every row's number perfectly centered; the
-                    // unit is only drawn beside the current value (no slot when there is none).
-                    Box(Modifier.width(if (unit.isEmpty()) 0.dp else 26.dp), contentAlignment = Alignment.CenterStart) {
-                        if (isCenter) Text(unit, fontSize = 12.sp, color = dc.slate)
-                    }
-                }
-            }
-        }
-        // Edge fades into the card background so the list dissolves instead of clipping.
-        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(WheelItemHeight * 1.2f).background(Brush.verticalGradient(listOf(dc.white, Color.Transparent))))
-        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(WheelItemHeight * 1.2f).background(Brush.verticalGradient(listOf(Color.Transparent, dc.white))))
-    }
-}
-
-
 
 /** Full-screen browse of "N年前的今天" photos, reached via 回忆时光机 → 去看看. */
 @OptIn(ExperimentalSharedTransitionApi::class)
