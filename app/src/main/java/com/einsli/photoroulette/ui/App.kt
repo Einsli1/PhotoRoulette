@@ -73,6 +73,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.imageLoader
 import coil.request.ImageRequest
+import coil.request.Disposable
 import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
 import kotlin.math.roundToInt
@@ -88,6 +89,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.delay
@@ -555,6 +557,73 @@ private fun MemoryPageBackdrop(
 }
 
 @OptIn(ExperimentalSharedTransitionApi::class)
+// ── 宫格缩略图预载（回收站 / 回忆时光机共用）───────────────────────────────────────
+// 设计：只预载「当前 viewport 附近」的固定窗口，绝不因快速滚动把沿途照片灌进队列。
+// 用户从第 0 张甩到第 5000 张：fling 期间 isScrollInProgress 恒为 true，经过的
+// 1..4999 不产生任何预载；fling 停稳（settle）并经过一小段防抖后，才围绕停稳位置
+// （如可见 5000..5020）铺 4970..5050 这一圈。滚动条快速拖拽的中间位置同样被防抖吞掉。
+// 可见区域 + 上方少量 + 下方少量 = 窗口；窗口大小固定，不随滚动历史增长（无 frontier）。
+private const val GRID_PRELOAD_MARGIN_ITEMS = 30
+private const val GRID_PRELOAD_SETTLE_DEBOUNCE_MS = 150L
+
+/**
+ * 以 viewport 为中心的固定窗口预载。请求与格子完全同参（data+size+视频帧），直接填
+ * 格子要读的那条内存缓存；窗口随停稳位置移动，落在窗口外、尚未解码完的请求立即取消，
+ * 因此任意时刻队列里的预载工作量都被限制在一个窗口内，而不是随滚动历史累积。
+ * 可见格子自身仍由组合期的 cell 请求负责（滑出即取消），这里的窗口只负责「附近的余量」。
+ */
+@Composable
+private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<PhotoEntity>, size: CoilSize) {
+    val context = LocalContext.current
+    val loader = remember(context) { context.imageLoader }
+    LaunchedEffect(gridState, photos, size) {
+        // index → 该预载请求的 Disposable：在队/解码中即存在，完成或取消后移出。
+        val tracked = HashMap<Int, Disposable>()
+        fun enqueue(index: Int) {
+            if (index in tracked) return
+            val photo = photos.getOrNull(index) ?: return
+            tracked[index] = loader.enqueue(
+                ImageRequest.Builder(context)
+                    .data(photo.uri)
+                    .size(size)
+                    .apply { if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000) }
+                    .build()
+            )
+        }
+        fun preloadAroundViewport() {
+            val info = gridState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+            val last = (info.visibleItemsInfo.lastOrNull()?.index ?: first).coerceAtLeast(first)
+            val from = (first - GRID_PRELOAD_MARGIN_ITEMS).coerceAtLeast(0)
+            val to = (last + GRID_PRELOAD_MARGIN_ITEMS).coerceAtMost(photos.lastIndex)
+            if (from > to) return
+            for (i in first..last) enqueue(i)      // 停稳的可见区最先入队
+            for (i in (last + 1)..to) enqueue(i)   // 下方余量（继续下滑的方向）
+            for (i in from until first) enqueue(i) // 上方余量
+            // 窗口外仍在排队/解码中的请求已不需要：取消；已完成的结果留在内存缓存不重解码。
+            val keep = from..to
+            tracked.entries.removeAll { (index, d) ->
+                if (index in keep) false else { if (!d.job.isCompleted) d.dispose(); true }
+            }
+        }
+        try {
+            // 进页时 isScrollInProgress 初始为 false，同样走到这里 → 首屏窗口在进入后
+            // ~150ms 铺开。滚动一恢复，collectLatest 会取消未触发的 delay，重新等停稳。
+            snapshotFlow { gridState.isScrollInProgress }
+                .distinctUntilChanged()
+                .collectLatest { scrolling ->
+                    if (!scrolling) {
+                        delay(GRID_PRELOAD_SETTLE_DEBOUNCE_MS)
+                        preloadAroundViewport()
+                    }
+                }
+        } finally {
+            // 离开页面或列表变化重建时，未完成的预载一并取消，不背着旧窗口跑完。
+            tracked.values.forEach { if (!it.job.isCompleted) it.dispose() }
+        }
+    }
+}
+
 @Composable private fun RecycleBin(items: List<PhotoEntity>, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var selected by remember { mutableStateOf(setOf<Long>()) }
@@ -577,50 +646,16 @@ private fun MemoryPageBackdrop(
         (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
     }
     // 缩略图解码尺寸 = 显示像素的 70%（400→280px）：解码快 ~2 倍、单张内存省一半，
-    // 配合扩容后的内存缓存（见 PhotoRouletteApp，35%→40%）仍可全量常驻内存。
+    // 配合扩容后的内存缓存（见 PhotoRouletteApp），窗口内载过的缩略图滑回来直接命中。
     val thumbPx = remember(gridCellPx) { (gridCellPx * 0.7f).roundToInt() }
     val gridThumbSize = remember(thumbPx) { CoilSize(thumbPx, thumbPx) }
     // One grid row = cell + vertical spacing (8dp); approximates the scroll offset from the
     // first visible item's index, used by the spring pull's limit detection.
     val localDensity = LocalDensity.current
     val gridRowPx = remember(gridCellPx) { gridCellPx + with(localDensity) { 8.dp.toPx() }.roundToInt() }
-    // Preload thumbnails aggressively: a first batch immediately on entry (so the initial
-    // viewports are decoded before the user scrolls), then a window around the visible range
-    // while scrolling. The requests use the exact same data+size as the cells, so they fill
-    // the memory-cache entries the cells will read — a fast fling re-shows photos instantly
-    // instead of re-decoding, and a cell that scrolls out mid-load is not wasted (the preload
-    // already holds the decoded bitmap).
-    val preloadContext = LocalContext.current
-    val preloadLoader = remember(preloadContext) { preloadContext.imageLoader }
-    LaunchedEffect(gridState, items, gridThumbSize) {
-        // Enqueue each index exactly once (no repeated requests piling up in Coil's queue):
-        // a monotonically advancing frontier keeps the queue short so early requests finish fast.
-        var frontier = -1
-        fun enqueueUntil(end: Int) {
-            val e = end.coerceAtMost(items.size)
-            while (frontier < e) {
-                frontier++
-                val photo = items.getOrNull(frontier) ?: break
-                preloadLoader.enqueue(
-                    ImageRequest.Builder(preloadContext)
-                        .data(photo.uri)
-                        .size(gridThumbSize)
-                        .apply {
-                            if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
-                        }
-                        .build()
-                )
-            }
-        }
-        // Batch 1: the first ~3 viewports (≈ 40 cells) immediately on entry.
-        enqueueUntil(40)
-        // 然后把整份列表分小批铺进内存（每批 12 张、批间 50ms，可见区域的请求可以在批间
-        // 插队）：几百张在几秒内全部常驻内存缓存，之后滑动全部命中缓存、零解码。
-        while (frontier < items.size) {
-            enqueueUntil(minOf(frontier + 12, items.size))
-            delay(50)
-        }
-    }
+    // 视口居中的固定窗口预载：只在滚动稳定停止后铺「可见区 ± 30 张」，快速甩动与滚动条
+    // 拖拽经过的中间位置完全不进队列（详见 [GridWindowedThumbnailPreload]）。
+    GridWindowedThumbnailPreload(gridState, items, gridThumbSize)
     PhotoSharedTransitionLayout {
         Box(Modifier.fillMaxSize()) {
             AnimatedContent(
@@ -1625,38 +1660,8 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     val backdropState = rememberLazyGridState()
     // The photo being closed: only its cell renders the Fit copy on re-entry (see RecycleBin).
     var closedMediaId by remember { mutableLongStateOf(-1L) }
-    // Preload memory-grid thumbnails aggressively (first batch on entry, then a window around
-    // the visible range) — same trick as RecycleBin, so fast flings rarely show placeholders.
-    val preloadContext = LocalContext.current
-    val preloadLoader = remember(preloadContext) { preloadContext.imageLoader }
-    LaunchedEffect(gridState, photos, gridThumbSize) {
-        // Enqueue each index exactly once (monotonic frontier keeps Coil's queue short).
-        var frontier = -1
-        fun enqueueUntil(end: Int) {
-            val e = end.coerceAtMost(photos.size)
-            while (frontier < e) {
-                frontier++
-                val photo = photos.getOrNull(frontier) ?: break
-                preloadLoader.enqueue(
-                    ImageRequest.Builder(preloadContext)
-                        .data(photo.uri)
-                        .size(gridThumbSize)
-                        .apply {
-                            if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
-                        }
-                        .build()
-                )
-            }
-        }
-        enqueueUntil(40)
-        snapshotFlow {
-            val info = gridState.layoutInfo
-            val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
-            first
-        }.collect { first ->
-            enqueueUntil(first + 54)
-        }
-    }
+    // 视口居中的固定窗口预载（同回收站）：甩动/滚动条拖拽经过的中间位置不进队列。
+    GridWindowedThumbnailPreload(gridState, photos, gridThumbSize)
     PhotoSharedTransitionLayout {
         Box(Modifier.fillMaxSize().background(dc.pageBg)) {
             AnimatedContent(

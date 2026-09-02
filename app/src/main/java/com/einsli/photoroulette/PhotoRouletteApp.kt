@@ -5,8 +5,8 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.memory.MemoryCache
 
-/** 全局图片加载器：内存缓存提到 35% 堆上限（默认 25%），配合缩略图降采样，
- *  让整个回收站（数百张缩略图）常驻内存，滑动时不再反复解码。 */
+/** 全局图片加载器：内存缓存提到 40% 堆上限（默认 25%），配合缩略图降采样，
+ *  让宫格预载窗口内及浏览过的缩略图常驻内存，滑回来直接命中、不再反复解码。 */
 class PhotoRouletteApp : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
