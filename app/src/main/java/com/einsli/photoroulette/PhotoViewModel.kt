@@ -7,9 +7,15 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.einsli.photoroulette.data.*
 import com.einsli.photoroulette.media.PreviewCache
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
@@ -181,6 +187,58 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
             .first()
             .associate { LocalDate.parse(it.day) to it.cnt }
     }
+    // ── 冷启动首帧写死(杀后台重启不许看到加载态):构造期用 runBlocking 同步读一份全量快照,
+    //    作为 ui 的 stateIn 初始值;配合 init 里同步发布会话,第一帧就是完整首页——包括回忆
+    //    时光机卡。关键在于所有读取「并行」发起:总耗时≈最慢一路(DataStore 读盘 或 Room 开库),
+    //    而不是当初串行版的逐项叠加(那版首帧 750~1065ms)。快照失败(DataStore/Room 异常或
+    //    1.5s 超时)则整体退回旧的异步加载路径。──
+    private val bootState: AppUiState = runBlocking {
+        val t0 = SystemClock.elapsedRealtime()
+        val snapshot = buildBootState()
+        if (snapshot != null) {
+            Log.d(TAG, "boot snapshot ok in " + (SystemClock.elapsedRealtime() - t0) + "ms: total=" + snapshot.total + ", queue=" + (snapshot.session?.queue?.size ?: 0))
+            snapshot
+        } else {
+            Log.w(TAG, "boot snapshot failed/timed out, falling back to async restore")
+            AppUiState()
+        }
+    }
+
+    /** 同步冷启动快照:全部读取并行发起,总耗时≈最慢一路。任何一步抛异常/超时都返回 null,
+     *  由调用方退回异步加载。 */
+    private suspend fun buildBootState(): AppUiState? = withTimeoutOrNull(1_500) {
+        coroutineScope {
+            val totalDef = async(Dispatchers.IO) { repository.totalCount.first() }
+            val processedDef = async(Dispatchers.IO) { repository.processedCount.first() }
+            val keptDef = async(Dispatchers.IO) { repository.keptCount.first() }
+            val daysDef = async(Dispatchers.IO) { repository.processedDays.first() }
+            val bytesDef = async(Dispatchers.IO) { repository.trashBytes.first() }
+            val memoryDef = async(Dispatchers.IO) { buildMemory(repository.memoryCandidates.first()) }
+            val weekDef = async(Dispatchers.IO) { weekStatsFlow(LocalDate.now().with(DayOfWeek.MONDAY)).first() }
+            val cumulativeDef = async(Dispatchers.IO) { settingsRepository.statsCounters.first() }
+            withContext(Dispatchers.IO) {
+                val cfg = settingsRepository.settings.first()
+                // 存档会话按 id 取行——库已被上面的并行统计查询打开,这里不再付开库成本
+                val restored = repository.sessionQueue(cfg)
+                AppUiState(
+                    loading = false,
+                    session = ReviewSession(1L, restored.queue, restored.position),
+                    total = totalDef.await(),
+                    processed = processedDef.await(),
+                    settings = cfg,
+                    stats = HomeStats(
+                        keptDef.await(),
+                        computeStreak(daysDef.await()),
+                        bytesDef.await(),
+                        memoryDef.await(),
+                    ),
+                    week = weekDef.await(),
+                    cumulative = cumulativeDef.await(),
+                )
+            }
+        }
+    }
+
     // combine() only has typed overloads up to 5 flows; merge the counters in a second stage.
     val ui = combine(
         combine(settings, session, counts, homeStats, weekStats) { config, sess, c, stats, week ->
@@ -188,10 +246,19 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         },
         statsCounters
     ) { base, cum -> base.copy(cumulative = cum) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, AppUiState())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, bootState)
 
     init {
-        restoreSession()
+        // 冷启动的会话已由 bootState 同步恢复,这里直接发布——不走 restoreSession 的
+        // 「先置 null 再异步发布」(那会在首帧闪加载态)。快照失败才退回异步恢复。
+        val restored = bootState.session
+        if (restored != null) {
+            session.value = restored
+            buildVersion = 1L
+            cardShownAt = SystemClock.elapsedRealtime()
+        } else {
+            restoreSession()
+        }
         reconcileQuietly()
         // Seed the lifetime counters from the current DB state on the first run after upgrade,
         // so existing installs don't start at zero. No-op afterwards.
