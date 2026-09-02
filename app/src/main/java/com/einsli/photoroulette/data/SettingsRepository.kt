@@ -35,6 +35,8 @@ data class StatsCounters(
 }
 
 class SettingsRepository(private val context: Context) {
+    /** 无 UI 组件(PreviewCache 等应用级单例)需要的 ApplicationContext 入口。 */
+    val appContext: Context get() = context.applicationContext
     private object Keys {
         val DAILY = intPreferencesKey("daily_count"); val VIDEO = booleanPreferencesKey("include_videos")
         val SCREENSHOTS = booleanPreferencesKey("include_screenshots"); val HOUR = intPreferencesKey("reminder_hour"); val MINUTE = intPreferencesKey("reminder_minute")

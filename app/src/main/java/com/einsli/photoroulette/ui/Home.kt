@@ -227,10 +227,12 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
                             .background(dc.white)
                     ) {
                         if (preview != null) {
+                            // 封面走 PreviewCache:冷启动打开即显,未命中回退原图。
                             VideoAwareImage(
                                 preview,
                                 Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
+                                contentScale = ContentScale.Crop,
+                                usePreviewFile = true
                             )
                         } else {
                             Column(
@@ -480,7 +482,8 @@ private fun MemoryCard(state: AppUiState, onOpenMemory: () -> Unit) {
                                 VideoAwareImage(
                                     photo,
                                     Modifier.fillMaxSize(),
-                                    contentScale = ContentScale.Crop
+                                    contentScale = ContentScale.Crop,
+                                    usePreviewFile = true
                                 )
                             }
                         }

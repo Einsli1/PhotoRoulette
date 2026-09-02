@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.einsli.photoroulette.data.*
+import com.einsli.photoroulette.media.PreviewCache
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -104,6 +105,28 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         repository.memoryCandidates.map { buildMemory(it) }
     ) { kept, streak, bytes, memory ->
         HomeStats(kept, streak, bytes, memory)
+    }
+
+    // ── 首页封面预热(PreviewCache):生成时机 = 数据确定的一刻,全部先于首页首帧,
+    //    新内容第一次出现即命中,冷启动首页两卡打开即显。 ──
+    init {
+        // 会话封面(current ?: queue[0]):冷启动恢复存档队列、开始/下一批/推进/撤销/
+        // 对账剔除都会改写 session —— 一个 collector 覆盖所有入口。
+        viewModelScope.launch {
+            session
+                .map { it?.current ?: it?.queue?.firstOrNull() }
+                .distinctUntilChangedBy { it?.mediaId }
+                .collect { photo -> photo?.let { PreviewCache.ensure(settingsRepository.appContext, it) } }
+        }
+        // 回忆封面:memory 按 dateTaken 确定性查询,只在跨天/重扫后变化;每次变化补 take(2)。
+        viewModelScope.launch {
+            repository.memoryCandidates
+                .map { buildMemory(it) }
+                .distinctUntilChanged()
+                .collect { memory ->
+                    memory?.photos?.take(2)?.forEach { PreviewCache.ensure(settingsRepository.appContext, it) }
+                }
+        }
     }
     // ── 周统计:任意一周(周一..周日)的 7 天趋势 + 汇总。「本周整理」与「历史整理」
     //    共用同一套窗口查询——历史记录也是按周显示和切换的。 ──

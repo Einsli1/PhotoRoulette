@@ -49,11 +49,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
 import com.einsli.photoroulette.data.PhotoEntity
+import com.einsli.photoroulette.media.PreviewCache
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -74,12 +76,31 @@ fun formatDuration(ms: Long): String {
  *
  * [thumbSize] pins the request to the same key as the review card's SharedGridImage, so the
  * behind-card / flying-card copies hit the already-loaded cache entry instead of re-decoding.
+ *
+ * [usePreviewFile] 读取 PreviewCache 的磁盘封面小图(cacheDir/previews):冷启动打开即显。
+ * 未命中时回退原图请求,并在成功后 write-through 补写小图,下次启动即命中。
  */
 @Composable
-fun VideoAwareImage(photo: PhotoEntity, modifier: Modifier = Modifier, contentScale: ContentScale = ContentScale.Crop, thumbSize: CoilSize? = null) {
+fun VideoAwareImage(photo: PhotoEntity, modifier: Modifier = Modifier, contentScale: ContentScale = ContentScale.Crop, thumbSize: CoilSize? = null, usePreviewFile: Boolean = false) {
     val context = LocalContext.current
-    val request = remember(photo.uri, thumbSize) { photoThumbRequest(context, photo, thumbSize) }
-    AsyncImage(model = request, contentDescription = photo.displayName, modifier = modifier, contentScale = contentScale)
+    val request = remember(photo.uri, thumbSize, usePreviewFile) {
+        if (usePreviewFile) PreviewCache.homeRequest(context, photo, thumbSize)
+        else photoThumbRequest(context, photo, thumbSize)
+    }
+    // 封面缓存未命中 → 本次回退原图;成功后补写小图(write-through),下次冷启动即显。
+    val writeThrough: ((AsyncImagePainter.State.Success) -> Unit)? =
+        if (usePreviewFile && !PreviewCache.hasPreview(context, photo.mediaId)) {
+            { _ -> PreviewCache.ensureAsync(context, photo) }
+        } else {
+            null
+        }
+    AsyncImage(
+        model = request,
+        contentDescription = photo.displayName,
+        modifier = modifier,
+        contentScale = contentScale,
+        onSuccess = writeThrough,
+    )
 }
 
 /**
