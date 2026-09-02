@@ -8,6 +8,7 @@ import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDp
@@ -274,7 +275,10 @@ internal fun AnimatedVisibilityScope.photoBranchRadius(
  * out when already zoomed in).
  *
  * Closing first snaps any pinch-zoom back to 1x, then invokes [onClose] with the current photo
- * so the caller can make its grid cell visible before the shared element returns.
+ * and whether the close came from a downward swipe. Two close styles:
+ * - 下滑提交(拖过阈值): 照片从松手位置顺势下滑出屏,预览侧摘掉 sharedElement —— 没有
+ *   缩放回位动画,宫格原位淡入([onClose] 第二参数为 true,调用方跳过回位相关准备)。
+ * - 侧滑/系统返回/关闭按钮: 照片经 shared element 缩放回位到宫格 cell(行为不变)。
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -283,7 +287,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
     initialIndex: Int,
     animatedRadius: Dp,
     animatedVisibilityScope: AnimatedVisibilityScope,
-    onClose: (PhotoEntity) -> Unit,
+    onClose: (PhotoEntity, viaSwipeDown: Boolean) -> Unit,
     modifier: Modifier = Modifier,
     swipeDownToClose: Boolean = false,
     /** Whole-page backdrop drawn BEHIND the black scrim and revealed as the photo is dragged
@@ -320,10 +324,9 @@ fun SharedTransitionScope.SharedPhotoPreview(
         label = "previewMorph",
     ) { s -> if (s == EnterExitState.Visible) 1f else 0f }
     var dragY by remember { mutableFloatStateOf(0f) }
-    // Pinned to the drag position when a dismiss is COMMITTED: the photo keeps flying via the
-    // shared transition while dragY springs back to 0, but the scrim must stay at the released
-    // position so the grid stays revealed for the whole exit.
-    var releasedDragY by remember { mutableFloatStateOf(0f) }
+    // 下滑提交式关闭:从预览侧摘掉 sharedElement(两侧不再匹配),返回转场不再把照片
+    // 缩放回宫格 cell;照片改由 dragY 继续驱动,顺势滑出屏幕底部。
+    var swipeOut by remember { mutableStateOf(false) }
     var zoomResetTick by remember { mutableIntStateOf(0) }
     var closePending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -331,7 +334,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
     // 状态栏高度在进入预览时固定捕获：状态栏隐藏时 chrome/时间戳不会跳位。
     val statusBarTop = rememberStatusBarTop()
     val dismissThreshold = with(density) { 96.dp.toPx() }
-    val effectiveDrag = maxOf(dragY, releasedDragY)
+    val effectiveDrag = dragY
     // The dark→bright reveal is deliberately SLOWER than the photo: the page behind reaches full
     // brightness only after dragging ~2x the dismiss threshold, so it trails the photo.
     val revealDistance = dismissThreshold * 2f
@@ -365,7 +368,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
         if (closePending) return
         closePending = true
         // Bump the tick: the current page's ZoomablePhoto animates back to 1x and then calls
-        // onResetDone → onClose(currentPhoto).
+        // onResetDone → onClose(currentPhoto, swipeOut).
         zoomResetTick++
     }
 
@@ -401,7 +404,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
             if (swipeDownToClose) {
                 Modifier.pointerInput(Unit) {
                     detectVerticalDragGestures(
-                        onDragStart = { releasedDragY = 0f },
+                        onDragStart = { },
                         onVerticalDrag = { change, amount ->
                             // Downward drags pull the photo down; upward ones snap back.
                             if (amount > 0f || dragY > 0f) {
@@ -411,16 +414,18 @@ fun SharedTransitionScope.SharedPhotoPreview(
                         },
                         onDragEnd = {
                             if (dragY > dismissThreshold) {
-                                // Start the return immediately FROM the released position:
-                                // requestClose() kicks off the shared-element flight back to the
-                                // grid cell while dragY animates to 0 over the same duration and
-                                // easing, so the photo keeps moving from where it was released
-                                // instead of snapping back to center first. Pin the photo where it
-                                // was released: the flight takes over from the released position
-                                // (the offset moves the layout, so the shared-element start bounds
-                                // include it). No dragY spring-back here — it would fight the flight.
-                                releasedDragY = dragY
-                                requestClose()
+                                // 下滑提交:从松手位置继续把布局 offset 推到屏幕底之外(与拖拽
+                                // 同一条通路),滑出后再走正常关闭 —— 不触发 shared-element 回位,
+                                // 也就没有缩放动画;scrim/reveal 跟随 dragY 同步变亮。
+                                swipeOut = true
+                                scope.launch {
+                                    val start = dragY
+                                    val travel = (size.height.toFloat() - start).coerceAtLeast(0f)
+                                    animate(0f, 1f, animationSpec = tween(300, easing = FastOutLinearInEasing)) { p, _ ->
+                                        dragY = start + travel * p
+                                    }
+                                    requestClose()
+                                }
                             } else {
                                 scope.launch {
                                     val start = dragY
@@ -430,17 +435,18 @@ fun SharedTransitionScope.SharedPhotoPreview(
                                 }
                             }
                         },
-                        onDragCancel = { dragY = 0f; releasedDragY = 0f },
+                        onDragCancel = { dragY = 0f },
                     )
                 }
             } else {
                 Modifier
             }
+        // swipeOut 时摘掉预览侧的 sharedElement:返回转场找不到匹配,就不会把照片"缩"
+        // 回宫格 cell(侧滑/系统返回路径 swipeOut=false,回位动画保持不变)。
         val sharedModifier: Modifier = Modifier
-            .sharedElement(
-                state,
-                animatedVisibilityScope,
-                boundsTransform = PhotoBoundsTransform,
+            .then(
+                if (swipeOut) Modifier
+                else Modifier.sharedElement(state, animatedVisibilityScope, boundsTransform = PhotoBoundsTransform)
             )
             .clip(RoundedCornerShape(animatedRadius))
 
@@ -479,7 +485,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
                         photo = p,
                         active = pagerState.currentPage == page,
                         resetTick = zoomResetTick,
-                        onResetDone = { if (closePending) onClose(currentPhoto) },
+                        onResetDone = { if (closePending) onClose(currentPhoto, swipeOut) },
                         placeholderRequest = placeholder,
                         bottomInset = videoBarBottomInset,
                         chromeProgress = chromeProgress,
@@ -491,7 +497,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
                         photo = p,
                         enabled = !transitionActive,
                         resetTick = zoomResetTick,
-                        onResetDone = { if (closePending) onClose(currentPhoto) },
+                        onResetDone = { if (closePending) onClose(currentPhoto, swipeOut) },
                         placeholderRequest = placeholder,
                         onTap = { if (tapToToggleChrome) chromeHidden = !chromeHidden },
                         doubleTapZoom = doubleTapToZoom,

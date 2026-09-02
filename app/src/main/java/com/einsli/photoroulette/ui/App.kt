@@ -428,8 +428,9 @@ private fun TrashPageBackdrop(
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = {}) { Text(if (selected.size != allIds.size) "全选" else "取消全选") }
-            Button(onClick = {}) { Text("移出回收站") }
-            Button(onClick = {}) { Text("批量删除") }
+            // 与真实页面一致:未选中时禁用(镜像页不可交互,但状态显示必须同步)。
+            Button(enabled = selected.isNotEmpty(), onClick = {}) { Text("移出回收站") }
+            Button(enabled = selected.isNotEmpty(), onClick = {}) { Text("批量删除") }
         }
         Spacer(Modifier.height(4.dp))
         Text("长按选中，点击圆圈多选，点击照片预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -800,17 +801,18 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
                         fullScreenPhotoArea = true,
                         tapToToggleChrome = true,
                         doubleTapToZoom = true,
-                        onClose = { current ->
+                        onClose = { current, viaSwipeDown ->
                             scope.launch {
-                                closedMediaId = current.mediaId
-                                val idx = items.indexOfFirst { it.mediaId == current.mediaId }
-                                // Scroll the grid BEFORE closing so the returning photo's cell is
-                                // already in view (and composed) when the return transition starts.
-                                // The backdrop mirror scrolls in sync so the exit crossfade swaps
-                                // two identical pages instead of jumping.
-                                if (idx >= 0) {
-                                    revealGridItemIfOffscreen(gridState, idx)
-                                    revealGridItemIfOffscreen(backdropState, idx)
+                                // 下滑划走式关闭:照片已滑出屏幕,宫格原位淡入 —— 没有 shared-element
+                                // 回位,closedMediaId(仅回位时 cell 需要的 Fit 拷贝)和滚动同步都不需要。
+                                // 侧滑/系统返回仍走回位路径:先滚动让目标 cell 可见并合成,再开始转场。
+                                if (!viaSwipeDown) {
+                                    closedMediaId = current.mediaId
+                                    val idx = items.indexOfFirst { it.mediaId == current.mediaId }
+                                    if (idx >= 0) {
+                                        revealGridItemIfOffscreen(gridState, idx)
+                                        revealGridItemIfOffscreen(backdropState, idx)
+                                    }
                                 }
                                 previewIndex = -1
                             }
@@ -1755,15 +1757,17 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                         fullScreenPhotoArea = true,
                         tapToToggleChrome = true,
                         doubleTapToZoom = true,
-                        onClose = { current ->
+                        onClose = { current, viaSwipeDown ->
                             scope.launch {
-                                closedMediaId = current.mediaId
-                                val idx = photos.indexOfFirst { it.mediaId == current.mediaId }
-                                // Scroll the grid BEFORE closing so the returning photo's cell is
-                                // already in view (and composed) when the return transition starts.
-                                if (idx >= 0) {
-                                    revealGridItemIfOffscreen(gridState, idx)
-                                    revealGridItemIfOffscreen(backdropState, idx)
+                                // 下滑划走式关闭:照片已滑出屏幕,宫格原位淡入,跳过回位相关准备
+                                // (同回收站);侧滑/系统返回仍走回位路径,先滚动再转场。
+                                if (!viaSwipeDown) {
+                                    closedMediaId = current.mediaId
+                                    val idx = photos.indexOfFirst { it.mediaId == current.mediaId }
+                                    if (idx >= 0) {
+                                        revealGridItemIfOffscreen(gridState, idx)
+                                        revealGridItemIfOffscreen(backdropState, idx)
+                                    }
                                 }
                                 previewIndex = -1
                             }
