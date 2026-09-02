@@ -625,6 +625,7 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
     }
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable private fun RecycleBin(items: List<PhotoEntity>, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var selected by remember { mutableStateOf(setOf<Long>()) }
