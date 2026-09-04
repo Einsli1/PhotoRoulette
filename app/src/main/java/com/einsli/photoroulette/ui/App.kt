@@ -87,6 +87,8 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
@@ -107,6 +109,9 @@ import com.einsli.photoroulette.data.PhotoState
  *  MemoryViewer (5) are standalone pages entered via a dedicated button. */
 private val immersivePages = setOf(2, 3, 5)
 
+/** 底部 Tab 栏的页面顺序:首页(0) / 统计(4) / 设置(1) —— pager 索引 ↔ page 值的映射。 */
+private val tabPages = listOf(0, 4, 1)
+
 /**
  * Where a page "comes from" on the screen, used as the scale transform origin for the
  * page transition. The origin matches the position of the entry button on the source
@@ -126,6 +131,24 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
     // Collected at the app level so the value is already loaded when the RecycleBin opens.
     val trashItems by viewModel.trashItems.collectAsStateWithLifecycle(emptyList())
     var page by rememberSaveable { mutableIntStateOf(if (openReviewRequest > 0) 2 else 0) }
+    // ── 底部 Tab 左右滑动切换(微信式)。page 是唯一状态源,pager 只有两条方向相反的
+    //    写入通路,各自的 guard 吸收反向写入,不形成回环、不叠加第二套动画:
+    //    1) 滑动:pager.currentPage 越过中线那一帧 → page = 目标 Tab(底部栏选中态随动);
+    //    2) 点击 Tab(page 被直接改写):pager 尚未以该页为目标/当前页时才 animateScrollToPage。
+    //    滑动驱动的 page 更新天然满足 2) 的 guard(滚动中的 targetPage 已是新页)。
+    val pagerState = rememberPagerState(initialPage = tabPages.indexOf(page).coerceAtLeast(0)) { tabPages.size }
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.currentPage }.collect { idx ->
+            val p = tabPages.getOrNull(idx) ?: return@collect
+            if (page in tabPages && page != p) page = p
+        }
+    }
+    LaunchedEffect(page) {
+        val idx = tabPages.indexOf(page)
+        if (idx < 0) return@LaunchedEffect // 沉浸页期间 pager 保持原位:总是从当前 Tab 打开,返回露出的就是它
+        if (pagerState.targetPage == idx || pagerState.currentPage == idx) return@LaunchedEffect
+        pagerState.animateScrollToPage(idx)
+    }
     // 通知/系统闹钟点击后直达整理页(openReviewRequest 由 MainActivity 递增)。冷启动时初始 page
     // 已落在 2 上,这里只负责后续的再次导航;无进行中会话时和首页「开始整理」一样重建一个。
     LaunchedEffect(openReviewRequest) {
@@ -208,69 +231,22 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
                 }
             }
         ) { padding ->
-            // Page transition, "zoom from the tapped card" style: when opening an immersive
-            // page (Review/RecycleBin/MemoryViewer) the current page stays fully visible
-            // underneath while the new page grows from its entry card and covers it; going
-            // back, the immersive page shrinks back into the card, revealing the static
-            // destination page underneath. Tab-to-tab keeps a subtle center zoom.
-            AnimatedContent(
-                targetState = page,
-                transitionSpec = {
-                    val enteringImmersive = targetState in immersivePages
-                    val leavingImmersive = initialState in immersivePages
-                    when {
-                        enteringImmersive -> {
-                            // Current page stays put (no exit), new page zooms in from its card.
-                            val origin = pageTransformOrigin(targetState)
-                            val ct = (scaleIn(
-                                initialScale = 0.55f,
-                                transformOrigin = origin,
-                                animationSpec = tween(320, easing = FastOutSlowInEasing)
-                            ) + fadeIn(tween(260)))
-                                .togetherWith(ExitTransition.None)
-                            ct.targetContentZIndex = 1f
-                            ct
-                        }
-                        leavingImmersive -> {
-                            // Destination page is already fully visible underneath; the immersive
-                            // page shrinks back into the card it came from.
-                            val origin = pageTransformOrigin(initialState)
-                            val ct = EnterTransition.None.togetherWith(
-                                scaleOut(
-                                    targetScale = 0.55f,
-                                    transformOrigin = origin,
-                                    animationSpec = tween(300)
-                                ) + fadeOut(tween(240))
-                            )
-                            ct.targetContentZIndex = 0f
-                            ct
-                        }
-                        else -> {
-                            // Plain tab switches: subtle center zoom both ways.
-                            (scaleIn(
-                                initialScale = 0.94f,
-                                transformOrigin = TransformOrigin(0.5f, 0.5f),
-                                animationSpec = tween(240, easing = FastOutSlowInEasing)
-                            ) + fadeIn(tween(180)))
-                                .togetherWith(
-                                    scaleOut(
-                                        targetScale = 0.96f,
-                                        transformOrigin = TransformOrigin(0.5f, 0.5f),
-                                        animationSpec = tween(200)
-                                    ) + fadeOut(tween(160))
-                                )
-                        }
-                    }
-                },
-                label = "page"
-            ) { targetPage ->
-                Box(
-                    Modifier
+            // 显式单根 Box:Scaffold 内容只认一个根;Tab 层在下、沉浸层在上。
+            Box(Modifier.fillMaxSize()) {
+                // ── Tab 层:首页/统计/设置住在一个 HorizontalPager 里,左右滑动即切换。 ──
+                // 手势滑动由 pager 连续驱动(跟手、不足回弹、两端自停);唯一的 Tab 状态是
+                // page,同步通路只有上方两条,不会叠加第二套动画,也不会互相打架。
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier
                         .fillMaxSize()
-                        .then(if (targetPage in immersivePages) Modifier else Modifier.padding(padding))
-                ) {
+                        .padding(padding),
+                    // 三页全部常驻组合:滑走再滑回时各页滚动/展开状态零丢失,
+                    // 邻页也无需在滑动中首次组合(避免掉帧)。
+                    beyondBoundsPageCount = tabPages.lastIndex,
+                ) { pagerIndex ->
                     PageContent(
-                        page = targetPage,
+                        page = tabPages[pagerIndex],
                         state = state,
                         viewModel = viewModel,
                         settingsScroll = settingsScroll,
@@ -282,6 +258,59 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
                         onNavigate = ::navigate,
                         onScan = { showPicker = true }
                     )
+                }
+                // ── 沉浸页层(整理 2 / 回收站 3 / 回忆 5):保留原有「从入口卡片放大/缩回」
+                //    转场。pager 恒在下方,天然就是旧转场里 ExitTransition.None /
+                //    EnterTransition.None 的「当前页原样垫底」语义;沉浸页总是从当前 Tab 打开,
+                //    返回时露出的就是它,无需额外同步。照片预览 shared element、回收站下滑
+                //    返回都在各页面内部作用域,不受 pager 影响。
+                AnimatedContent(
+                    targetState = page.takeIf { it in immersivePages },
+                    transitionSpec = {
+                        val target = targetState
+                        val initial = initialState
+                        if (target != null) {
+                            // 进入沉浸页:Tab 页原样垫底,沉浸页从入口卡片放大盖上。
+                            val ct = (scaleIn(
+                                initialScale = 0.55f,
+                                transformOrigin = pageTransformOrigin(target),
+                                animationSpec = tween(320, easing = FastOutSlowInEasing)
+                            ) + fadeIn(tween(260)))
+                                .togetherWith(ExitTransition.None)
+                            ct.targetContentZIndex = 1f
+                            ct
+                        } else {
+                            // 返回 Tab:目标 Tab 页已完全可见,沉浸页缩回入口卡片。
+                            val origin = initial?.let { pageTransformOrigin(it) }
+                                ?: TransformOrigin(0.5f, 0.5f)
+                            val ct = EnterTransition.None.togetherWith(
+                                scaleOut(
+                                    targetScale = 0.55f,
+                                    transformOrigin = origin,
+                                    animationSpec = tween(300)
+                                ) + fadeOut(tween(240))
+                            )
+                            ct.targetContentZIndex = 0f
+                            ct
+                        }
+                    },
+                    label = "immersivePage"
+                ) { immersivePage ->
+                    if (immersivePage != null) {
+                        PageContent(
+                            page = immersivePage,
+                            state = state,
+                            viewModel = viewModel,
+                            settingsScroll = settingsScroll,
+                            savedSettingsScroll = savedSettingsScroll,
+                            trashItems = trashItems,
+                            onAction = onAction,
+                            onCommitDeletes = onCommitDeletes,
+                            onRestoreFromTrash = onRestoreFromTrash,
+                            onNavigate = ::navigate,
+                            onScan = { showPicker = true }
+                        )
+                    }
                 }
             }
         }
