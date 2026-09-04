@@ -403,110 +403,6 @@ private fun PageContent(
     }, dismissButton = { TextButton(onClick = onClose) { Text("取消") } })
 }
 
-/**
- * If the photo being returned to is outside the grid's current viewport, scroll the grid to it
- * BEFORE the shared-element return transition starts. Two things depend on this ordering:
- * 1. The destination cell must be composed on the first frame of the transition, otherwise the
- *    photo stays full-screen and only snaps into the cell afterwards.
- * 2. The scroll must not happen mid-animation, otherwise the destination moves under the flying
- *    photo and the grid jumps to put the cell at the top.
- *
- * [LazyGridState.requestScrollToItem] is a synchronous position update (no remeasure), so it is
- * safe to call while the grid is not composed behind the preview. The scroll is minimal: a cell
- * above the viewport is revealed at the top edge, a cell below at the bottom edge.
- */
-private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
-    val visible = state.layoutInfo.visibleItemsInfo
-    val first = visible.firstOrNull()?.index
-    val last = visible.lastOrNull()?.index
-    if (first == null || last == null || index < first || index > last) {
-        val scrollOffset = if (first != null && last != null && index > last) {
-            val cellHeight = visible.first().size.height
-            (state.layoutInfo.viewportSize.height - cellHeight).coerceAtLeast(0)
-        } else {
-            0
-        }
-        state.requestScrollToItem(index, scrollOffset)
-    }
-}
-
-/** Whole-page mirror of the RecycleBin, rendered behind the preview's black scrim and revealed
- *  on swipe-down. The layout mirrors the real page EXACTLY (same paddings / spacings / weights),
- *  so the reveal and the exit crossfade align pixel-for-pixel with the real page; the grid uses
- *  the same cell thumbnails and the caller keeps its scroll in sync. Not interactive. */
-@Composable
-private fun TrashPageBackdrop(
-    items: List<PhotoEntity>,
-    selected: Set<Long>,
-    state: LazyGridState,
-    thumbSize: CoilSize,
-) {
-    val allIds = items.map { it.mediaId }.toSet()
-    val statusBarTop = rememberStatusBarTop()
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(top = statusBarTop)
-            .navigationBarsPadding()
-            .padding(12.dp)
-    ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("回收站", style = MaterialTheme.typography.headlineMedium)
-            // 镜像页同步的选中数量提示（不可交互，仅保持与真实页面像素一致）
-            if (selected.isNotEmpty()) {
-                Text(
-                    "已选 ${selected.size}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Button(onClick = {}) { Text("返回") }
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {}) { Text(if (selected.size != allIds.size) "全选" else "取消全选") }
-            // 与真实页面一致:未选中时禁用(镜像页不可交互,但状态显示必须同步)。
-            Button(enabled = selected.isNotEmpty(), onClick = {}) { Text("移出回收站") }
-            Button(enabled = selected.isNotEmpty(), onClick = {}) { Text("批量删除") }
-        }
-        Spacer(Modifier.height(4.dp))
-        Text("长按选中，点击圆圈多选，点击照片预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(8.dp))
-        LazyVerticalGrid(
-            state = state,
-            columns = GridCells.Fixed(3),
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            userScrollEnabled = false,
-        ) {
-            itemsIndexed(
-                items,
-                key = { _, photo -> photo.mediaId },
-                contentType = { _, photo -> if (photo.mimeType.startsWith("video/")) "video" else "image" },
-            ) { _, photo ->
-                val checked = selected.contains(photo.mediaId)
-                Box(
-                    Modifier
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                ) {
-                    VideoAwareImage(photo, Modifier.fillMaxSize(), thumbSize = thumbSize)
-                    VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
-                    // 镜像页的右下角选中圆圈（静态、不可交互——只在预览下拉时露出）；
-                    // 与宫格一致，仅在有选中照片时显示。
-                    if (selected.isNotEmpty()) {
-                        Box(Modifier.align(Alignment.BottomEnd)) {
-                            TrashSelectionBadge(checked)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 /** 回收站宫格右下角的选中标识：未选中=空心圆圈（深色细描边 + 白色圆环，任何照片上都看得清），
  *  已选中=实心圆 + 对勾。选中状态只体现在这个圆圈上，照片本身保持原色。 */
 @Composable
@@ -539,57 +435,6 @@ private fun TrashSelectionBadge(checked: Boolean, modifier: Modifier = Modifier)
                 tint = MaterialTheme.colorScheme.onPrimary,
                 modifier = Modifier.size(14.dp),
             )
-        }
-    }
-}
-
-/** Whole-page mirror of the MemoryViewer (回忆时光机), same role as [TrashPageBackdrop]. */
-@Composable
-private fun MemoryPageBackdrop(
-    memory: MemoryInfo?,
-    photos: List<PhotoEntity>,
-    state: LazyGridState,
-    thumbSize: CoilSize,
-    dc: DesignColors,
-) {
-    val statusBarTop = rememberStatusBarTop()
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(top = statusBarTop)
-            .navigationBarsPadding()
-            .padding(horizontal = 20.dp)
-    ) {
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = {}) { Icon(Icons.Default.Close, "返回") }
-            Column(Modifier.weight(1f)) {
-                Text("回忆时光机", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = dc.ink)
-                if (memory != null) {
-                    Text("${memory.yearsAgo}年前的今天 · ${memory.dateText} · ${memory.count} 张照片", fontSize = 12.sp, color = dc.slate)
-                }
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-        LazyVerticalGrid(
-            state = state,
-            columns = GridCells.Fixed(3),
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            userScrollEnabled = false,
-        ) {
-            itemsIndexed(photos) { _, photo ->
-                Box(
-                    Modifier
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(dc.white)
-                ) {
-                    VideoAwareImage(photo, Modifier.fillMaxSize(), thumbSize = thumbSize)
-                    VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
-                }
-            }
         }
     }
 }
@@ -674,12 +519,6 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
     // BackHandler (composed later) wins and closes the preview first.
     BackHandler(onBack = onBack)
     val gridState = rememberLazyGridState()
-    // Scroll state for the preview's whole-page backdrop mirror (TrashPageBackdrop), seeded
-    // with the real grid's scroll when a preview opens and scrolled in sync when it closes.
-    val backdropState = rememberLazyGridState()
-    // The photo being closed: only ITS grid cell renders the full-screen Fit copy on re-entry
-    // (the flight target); the other cells fade in Crop thumbnails (avoids a first-frame stall).
-    var closedMediaId by remember { mutableLongStateOf(-1L) }
     // Cell-sized decode target for grid thumbnails: 3 columns, so ~screenWidth/3 px. Fixing the
     // request size keeps every cell's memory-cache entry identical and small, so fast scrolling
     // re-shows already-loaded photos instantly instead of re-decoding.
@@ -699,24 +538,23 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
     GridWindowedThumbnailPreload(gridState, items, gridThumbSize)
     PhotoSharedTransitionLayout {
         Box(Modifier.fillMaxSize().background(dc.pageBg)) {
-            AnimatedContent(
-                targetState = if (previewOpen) previewIndex else null,
-                transitionSpec = {
-                    fadeIn(tween(PhotoTransitionMillis)) togetherWith fadeOut(tween(PhotoTransitionMillis))
-                },
-                label = "trashPreview",
-            ) { target ->
-                if (target == null) {
-                    // ── Grid branch ──
-                    val radius = photoBranchRadius(gridCornerRadius = 8.dp, gridSide = true)
-                    val statusBarTop = rememberStatusBarTop()
-                    Column(
-                        Modifier
-                            .fillMaxSize()
-                            .padding(top = statusBarTop)
-                            .navigationBarsPadding()
-                            .padding(12.dp)
-                    ) {
+            // ── 页面层：常驻组合（AnimatedVisibility(visible=true) 只提供 shared-element scope，
+            //    永不进出组合）── 预览开关不再重组合页面：下滑返回时缩略图/滚动原位保留，
+            //    没有「重新组合灰格 + 交叉淡化」的整页闪烁。
+            AnimatedVisibility(
+                visible = true,
+                enter = EnterTransition.None,
+                exit = ExitTransition.None,
+            ) {
+                val radius = photoBranchRadius(gridCornerRadius = 8.dp, gridSide = true)
+                val statusBarTop = rememberStatusBarTop()
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(top = statusBarTop)
+                        .navigationBarsPadding()
+                        .padding(12.dp)
+                ) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Text("回收站", style = MaterialTheme.typography.headlineMedium)
                             // 选中数量提示：显示在标题与返回按钮之间，无选中时不占位
@@ -795,14 +633,13 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
                                                 .pointerInput(photo.mediaId) {
                                                     detectTapGestures(
                                                         onTap = {
-                                                            backdropState.requestScrollToItem(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset)
                                                             previewIndex = index
                                                         },
                                                         onLongPress = { selected = if (liveChecked) selected - photo.mediaId else selected + photo.mediaId }
                                                     )
                                                 }
                                         ) {
-                                            SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize, fitOnEnter = photo.mediaId == closedMediaId)
+                                            SharedGridImage(photo, radius, this@AnimatedVisibility, Modifier.fillMaxSize(), gridSize = gridThumbSize)
                                             VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
                                             // 右下角选中圆圈：平时不显示；只要选中了任意一张，
                                             // 所有照片都显示圆圈（选中的实心、未选的空心），点圆圈
@@ -829,41 +666,31 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
                             }
                         }
                     }
-                } else {
-                    // ── Preview branch ──
+            }
+            // ── 预览层：overlay（AnimatedVisibility 单一常驻实例，不随开关销毁重建——
+            //    快速「关闭再点开」只是 visible 翻转，shared-element state 不会反复
+            //    add/remove，避免飞行卡死在源 bounds / isTransitionActive 悬挂的卡死）──
+            AnimatedVisibility(
+                visible = previewOpen,
+                enter = fadeIn(tween(PhotoTransitionMillis)),
+                exit = fadeOut(tween(PhotoTransitionMillis)),
+                label = "trashPreview",
+            ) {
+                if (previewIndex in items.indices) {
                     SharedPhotoPreview(
                         photos = items,
-                        initialIndex = target,
-                        animatedRadius = photoBranchRadius(gridCornerRadius = 8.dp, gridSide = false),
-                        animatedVisibilityScope = this@AnimatedContent,
+                        initialIndex = previewIndex,
                         swipeDownToClose = true,
                         sourceThumbSize = gridThumbSize,
                         fullScreenPhotoArea = true,
                         tapToToggleChrome = true,
                         doubleTapToZoom = true,
-                        onClose = { current, viaSwipeDown ->
+                        active = previewOpen,
+                        onClose = { _, _ ->
                             scope.launch {
-                                // 下滑划走式关闭:照片已滑出屏幕,宫格原位淡入 —— 没有 shared-element
-                                // 回位,closedMediaId(仅回位时 cell 需要的 Fit 拷贝)和滚动同步都不需要。
-                                // 侧滑/系统返回仍走回位路径:先滚动让目标 cell 可见并合成,再开始转场。
-                                if (!viaSwipeDown) {
-                                    closedMediaId = current.mediaId
-                                    val idx = items.indexOfFirst { it.mediaId == current.mediaId }
-                                    if (idx >= 0) {
-                                        revealGridItemIfOffscreen(gridState, idx)
-                                        revealGridItemIfOffscreen(backdropState, idx)
-                                    }
-                                }
+                                // 无 shared element 飞行：任何关闭路径都只是关掉 overlay。
                                 previewIndex = -1
                             }
-                        },
-                        revealContent = {
-                            TrashPageBackdrop(
-                                items = items,
-                                selected = selected,
-                                state = backdropState,
-                                thumbSize = gridThumbSize,
-                            )
                         },
                         bottomControls = { current ->
                             Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1698,32 +1525,25 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     // preview is open, SharedPhotoPreview's own BackHandler (composed later) closes it first.
     BackHandler(onBack = onBack)
     val gridState = rememberLazyGridState()
-    // Scroll state for the preview's whole-page backdrop mirror (MemoryPageBackdrop).
-    val backdropState = rememberLazyGridState()
-    // The photo being closed: only its cell renders the Fit copy on re-entry (see RecycleBin).
-    var closedMediaId by remember { mutableLongStateOf(-1L) }
     // 视口居中的固定窗口预载（同回收站）：甩动/滚动条拖拽经过的中间位置不进队列。
     GridWindowedThumbnailPreload(gridState, photos, gridThumbSize)
     PhotoSharedTransitionLayout {
         Box(Modifier.fillMaxSize().background(dc.pageBg)) {
-            AnimatedContent(
-                targetState = if (previewOpen) previewIndex else null,
-                transitionSpec = {
-                    fadeIn(tween(PhotoTransitionMillis)) togetherWith fadeOut(tween(PhotoTransitionMillis))
-                },
-                label = "memoryPreview",
-            ) { target ->
-                if (target == null) {
-                    // ── Grid branch ──
-                    val radius = photoBranchRadius(gridCornerRadius = 12.dp, gridSide = true)
-                    val statusBarTop = rememberStatusBarTop()
-                    Column(
-                        Modifier
-                            .fillMaxSize()
-                            .padding(top = statusBarTop)
-                            .navigationBarsPadding()
-                            .padding(horizontal = 20.dp)
-                    ) {
+            // ── 页面层：常驻组合（同回收站：AnimatedVisibility(visible=true) 只提供 scope）──
+            AnimatedVisibility(
+                visible = true,
+                enter = EnterTransition.None,
+                exit = ExitTransition.None,
+            ) {
+                val radius = photoBranchRadius(gridCornerRadius = 12.dp, gridSide = true)
+                val statusBarTop = rememberStatusBarTop()
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(top = statusBarTop)
+                        .navigationBarsPadding()
+                        .padding(horizontal = 20.dp)
+                ) {
                         Spacer(Modifier.height(10.dp))
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = onBack) { Icon(Icons.Default.Close, "返回") }
@@ -1773,11 +1593,10 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                                 .clip(RoundedCornerShape(12.dp))
                                                 .background(dc.white)
                                                 .clickable {
-                                                    backdropState.requestScrollToItem(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset)
                                                     previewIndex = index
                                                 }
                                         ) {
-                                            SharedGridImage(photo, radius, this@AnimatedContent, Modifier.fillMaxSize(), gridSize = gridThumbSize, fitOnEnter = photo.mediaId == closedMediaId)
+                                            SharedGridImage(photo, radius, this@AnimatedVisibility, Modifier.fillMaxSize(), gridSize = gridThumbSize)
                                             VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
                                         }
                                     }
@@ -1785,41 +1604,30 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                             }
                         }
                     }
-                } else {
-                    // ── Preview branch ──
+            }
+            // ── 预览层：overlay（同回收站：AnimatedVisibility 单一常驻实例，不随开关销毁重建，
+            //    快速「关闭再点开」只是 visible 翻转，shared-element state 不反复增删）──
+            AnimatedVisibility(
+                visible = previewOpen,
+                enter = fadeIn(tween(PhotoTransitionMillis)),
+                exit = fadeOut(tween(PhotoTransitionMillis)),
+                label = "memoryPreview",
+            ) {
+                if (previewIndex in photos.indices) {
                     SharedPhotoPreview(
                         photos = photos,
-                        initialIndex = target,
-                        animatedRadius = photoBranchRadius(gridCornerRadius = 12.dp, gridSide = false),
-                        animatedVisibilityScope = this@AnimatedContent,
+                        initialIndex = previewIndex,
                         swipeDownToClose = true,
                         sourceThumbSize = gridThumbSize,
                         fullScreenPhotoArea = true,
                         tapToToggleChrome = true,
                         doubleTapToZoom = true,
-                        onClose = { current, viaSwipeDown ->
+                        active = previewOpen,
+                        onClose = { _, _ ->
                             scope.launch {
-                                // 下滑划走式关闭:照片已滑出屏幕,宫格原位淡入,跳过回位相关准备
-                                // (同回收站);侧滑/系统返回仍走回位路径,先滚动再转场。
-                                if (!viaSwipeDown) {
-                                    closedMediaId = current.mediaId
-                                    val idx = photos.indexOfFirst { it.mediaId == current.mediaId }
-                                    if (idx >= 0) {
-                                        revealGridItemIfOffscreen(gridState, idx)
-                                        revealGridItemIfOffscreen(backdropState, idx)
-                                    }
-                                }
+                                // 无 shared element 飞行：任何关闭路径都只是关掉 overlay。
                                 previewIndex = -1
                             }
-                        },
-                        revealContent = {
-                            MemoryPageBackdrop(
-                                memory = memory,
-                                photos = photos,
-                                state = backdropState,
-                                thumbSize = gridThumbSize,
-                                dc = dc,
-                            )
                         },
                     )
                 }

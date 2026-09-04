@@ -74,6 +74,7 @@ import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
 import com.einsli.photoroulette.data.PhotoEntity
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Shared element key: stable per photo, never index-based. */
@@ -260,42 +261,45 @@ internal fun AnimatedVisibilityScope.photoBranchRadius(
 }
 
 /**
- * Full-screen preview branch, composed inside the AnimatedContent's preview branch.
+ * Full-screen preview overlay, composed inside the caller's AnimatedVisibility overlay branch
+ * and layered ABOVE the caller's always-composed page.
  *
- * Only the photo area is a shared element (key = the CURRENT pager page's photo, so swiping
- * only swaps the key without retriggering a transition and closing returns the photo that is
- * actually on screen back to its own grid cell). The black background, the header and the
- * optional bottom controls are plain content of the branch and fade with the branch transition.
+ * NOTE: this overlay does NOT participate in the shared-element system. The page layer's cells
+ * stay in their own AnimatedVisibility(visible=true) scope; the flying photo would need the
+ * shared-transition machinery to start a bounds animation between two scopes, but in Compose
+ * 1.7.6 that flight never starts reliably when the source scope never exits (BoundsAnimation.
+ * animate() only fires while isTransitionActive is true, which is driven by running scope
+ * transitions — the always-composed page has none). Photos therefore appear full-screen directly
+ * (fade in with the overlay) instead of being stuck at the source cell bounds.
  *
- * Two layouts: by default (整理页) the photo area sits between the header and the controls so
- * long photos never extend under the buttons. With [fullScreenPhotoArea] (回收站/回忆时光机)
- * the photo fills the ENTIRE screen (including under the system bars) and the header/buttons
- * float on top of it. In that mode [tapToToggleChrome] lets a single tap on a photo hide/show
- * the header and buttons, and [doubleTapToZoom] makes a double tap zoom 1x↔3x (only zooms back
- * out when already zoomed in).
+ * The black scrim covers the real page beneath and fades as the photo is dragged down — the
+ * page behind brightens from dark.
+ *
+ * [fullScreenPhotoArea] (回收站/回忆时光机): the photo fills the ENTIRE screen (including under
+ * the system bars) and the header/buttons float on top of it. [tapToToggleChrome] lets a single
+ * tap on a photo hide/show the header and buttons, and [doubleTapToZoom] makes a double tap zoom
+ * 1x↔3x (only zooms back out when already zoomed in).
+ *
+ * Opening: the header/buttons stay hidden while the overlay fades in (~300ms) and fade in
+ * afterwards, so they never overlap the photo awkwardly.
  *
  * Closing first snaps any pinch-zoom back to 1x, then invokes [onClose] with the current photo
- * and whether the close came from a downward swipe. Two close styles:
- * - 下滑提交(拖过阈值): 照片从松手位置顺势下滑出屏,预览侧摘掉 sharedElement —— 没有
- *   缩放回位动画,宫格原位淡入([onClose] 第二参数为 true,调用方跳过回位相关准备)。
- * - 侧滑/系统返回/关闭按钮: 照片经 shared element 缩放回位到宫格 cell(行为不变)。
+ * and whether the close came from a downward swipe:
+ * - 下滑提交(拖过阈值): 照片从松手位置顺势下滑出屏,页面原样露出。
+ * - 侧滑/系统返回/关闭按钮: 直接关闭(overlay 淡出)。
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-fun SharedTransitionScope.SharedPhotoPreview(
+fun SharedPhotoPreview(
     photos: List<PhotoEntity>,
     initialIndex: Int,
-    animatedRadius: Dp,
-    animatedVisibilityScope: AnimatedVisibilityScope,
     onClose: (PhotoEntity, viaSwipeDown: Boolean) -> Unit,
     modifier: Modifier = Modifier,
     swipeDownToClose: Boolean = false,
-    /** Whole-page backdrop drawn BEHIND the black scrim and revealed as the photo is dragged
-     *  down to dismiss (the caller passes a mirror of its page so the reveal shows the full
-     *  page — title, buttons and grid — brightening from dark). */
-    revealContent: (@Composable () -> Unit)? = null,
+    /** 预览 overlay 是否处于打开态（调用方用 AnimatedVisibility(visible=...) 驱动时传入）。
+     *  实例常驻时（快速关闭再打开不销毁重建），active 变 true 重置本次会话状态。 */
+    active: Boolean = true,
     bottomControls: (@Composable (current: PhotoEntity) -> Unit)? = null,
-    sourceContentScale: ContentScale = ContentScale.Crop,
     sourceThumbSize: CoilSize? = null,
     /** 照片铺满整块屏幕（含系统栏之下），标题和按钮浮在照片上层（回收站/回忆时光机）。 */
     fullScreenPhotoArea: Boolean = false,
@@ -305,27 +309,16 @@ fun SharedTransitionScope.SharedPhotoPreview(
     doubleTapToZoom: Boolean = false,
 ) {
     // Capture the list for this preview session: an in-preview restore/delete (which changes the
-    // page's list) never yanks the pager out from under the exit animation.
-    val openPhotos = remember { photos }
+    // page's list) never yanks the pager out from under the exit animation. Re-key on the list
+    // identity so a reopen after the list changed (restore/delete) shows the fresh list.
+    val openPhotos = remember(photos) { photos }
     val pagerState = rememberPagerState(
         initialPage = initialIndex.coerceIn(0, (openPhotos.size - 1).coerceAtLeast(0)),
     ) { openPhotos.size.coerceAtLeast(1) }
     val currentPhoto = openPhotos.getOrNull(pagerState.currentPage) ?: return
     val context = LocalContext.current
-    val state = rememberSharedContentState(photoSharedKey(currentPhoto.mediaId))
-    // While a shared transition is running the image is controlled by the transition; disable
-    // pinch/pan so the two never fight over the same photo.
-    val transitionActive = isTransitionActive
-    // While the preview branch is entering (the open transition) this goes 0 → 1 in step with the
-    // shared-element bounds animation. The shared element animates from the grid cell up to
-    // full-screen, so it must render the source scale at the start and Fit at the end.
-    val morph by animatedVisibilityScope.transition.animateFloat(
-        transitionSpec = { tween(PhotoTransitionMillis, easing = FastOutSlowInEasing) },
-        label = "previewMorph",
-    ) { s -> if (s == EnterExitState.Visible) 1f else 0f }
     var dragY by remember { mutableFloatStateOf(0f) }
-    // 下滑提交式关闭:从预览侧摘掉 sharedElement(两侧不再匹配),返回转场不再把照片
-    // 缩放回宫格 cell;照片改由 dragY 继续驱动,顺势滑出屏幕底部。
+    // 下滑提交式关闭:照片从松手位置顺势滑出屏幕底部。
     var swipeOut by remember { mutableStateOf(false) }
     var zoomResetTick by remember { mutableIntStateOf(0) }
     var closePending by remember { mutableStateOf(false) }
@@ -339,10 +332,34 @@ fun SharedTransitionScope.SharedPhotoPreview(
     // brightness only after dragging ~2x the dismiss threshold, so it trails the photo.
     val revealDistance = dismissThreshold * 2f
     val revealProgress =
-        if (swipeDownToClose && revealContent != null) (effectiveDrag / revealDistance).coerceIn(0f, 1f) else 0f
+        if (swipeDownToClose) (effectiveDrag / revealDistance).coerceIn(0f, 1f) else 0f
     val scrimAlpha = 1f - revealProgress
     // 单击照片隐藏/显示标题与按钮（仅照片，非视频；视频点击仍是播放/暂停）。
     var chromeHidden by remember { mutableStateOf(false) }
+    // 打开预览时：标题/按钮先隐藏，等 overlay 淡入结束后再淡入——出现即固定为
+    // 「按钮浮在照片上层」，不会在过渡期间与照片互相盖压（bug 3）。
+    var chromeRevealed by remember { mutableStateOf(false) }
+    // 实例常驻（AnimatedVisibility(visible=...) 驱动）时，快速关闭再打开不销毁重建本实例：
+    // active 翻转为 true 时重置本次会话状态（否则会带着上次的 dragY/swipeOut/缩放残留），
+    // 并把 pager 定位到新打开的初始照片。
+    LaunchedEffect(active) {
+        if (active) {
+            dragY = 0f
+            swipeOut = false
+            closePending = false
+            chromeHidden = false
+            chromeRevealed = false
+            zoomResetTick++ // 强制当前照片缩回 1x（新打开的照片从 1x 起步）
+            pagerState.scrollToPage(initialIndex.coerceIn(0, (openPhotos.size - 1).coerceAtLeast(0)))
+            delay(PhotoTransitionMillis + 30L)
+            chromeRevealed = true
+        }
+    }
+    val chromeRevealAlpha by animateFloatAsState(
+        targetValue = if (chromeRevealed) 1f else 0f,
+        animationSpec = tween(250, easing = FastOutSlowInEasing),
+        label = "chromeReveal",
+    )
     // Title / buttons are NOT tied to the photo's drag distance: any downward drag (>0px) flies
     // them out of the screen immediately; they fly back as soon as the photo returns to rest.
     // 单击隐藏时同样飞出屏幕，再单击飞回。
@@ -372,33 +389,35 @@ fun SharedTransitionScope.SharedPhotoPreview(
         zoomResetTick++
     }
 
-    BackHandler { requestClose() }
+    // 退出中（active=false）关闭 BackHandler：让返回键直接落到页面层，不吞掉关闭动画。
+    BackHandler(enabled = active) { requestClose() }
 
     Box(
         modifier
             .fillMaxSize()
     ) {
-        // Whole-page backdrop (the caller's page mirror), then a touch-absorbing layer so the
-        // preview's transparent areas never reach the (real) page beneath, then the black scrim
-        // that fades out as the photo is dragged down — "the page behind brightens from dark".
-        revealContent?.invoke()
+        // 页面层由调用方常驻组合在本预览 overlay 的下层：scrim 不透明时盖住真实页面，
+        // 拖拽变透明时直接露出它。先放一层 touch-absorbing 层，让预览的透明区域永远到不了
+        // （真实）页面，再放黑色 scrim —— 照片被拖下时「页面从暗变亮」。
+        // closePending 后（照片已滑出，overlay 即将消失）不再吸收点击，网格立即可点——
+        // 修「下滑返回后快速点击」被旧预览 absorber 吞掉的卡死。
         Box(
             Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            awaitPointerEvent().changes.forEach { it.consume() }
+                .pointerInput(closePending) {
+                    if (!closePending) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent().changes.forEach { it.consume() }
+                            }
                         }
                     }
                 }
         )
         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = scrimAlpha)))
 
-        // ── 照片区域（shared element）──
-        // Layout-level offset (not graphicsLayer): the shared-element flight reads LAYOUT
-        // bounds, so starting from the dragged position requires the drag to move the layout —
-        // otherwise the return flight snaps to center first.
+        // ── 照片区域（全屏，无 shared element）──
+        // Layout-level offset (not graphicsLayer): the photo follows the drag with the layout.
         val dragOffset = Modifier.offset { IntOffset(0, dragY.roundToInt()) }
         val swipeDownModifier: Modifier =
             if (swipeDownToClose) {
@@ -415,8 +434,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
                         onDragEnd = {
                             if (dragY > dismissThreshold) {
                                 // 下滑提交:从松手位置继续把布局 offset 推到屏幕底之外(与拖拽
-                                // 同一条通路),滑出后再走正常关闭 —— 不触发 shared-element 回位,
-                                // 也就没有缩放动画;scrim/reveal 跟随 dragY 同步变亮。
+                                // 同一条通路),滑出后再走正常关闭;scrim 跟随 dragY 同步变亮。
                                 swipeOut = true
                                 scope.launch {
                                     val start = dragY
@@ -441,42 +459,15 @@ fun SharedTransitionScope.SharedPhotoPreview(
             } else {
                 Modifier
             }
-        // swipeOut 时摘掉预览侧的 sharedElement:返回转场找不到匹配,就不会把照片"缩"
-        // 回宫格 cell(侧滑/系统返回路径 swipeOut=false,回位动画保持不变)。
-        val sharedModifier: Modifier = Modifier
-            .then(
-                if (swipeOut) Modifier
-                else Modifier.sharedElement(state, animatedVisibilityScope, boundsTransform = PhotoBoundsTransform)
-            )
-            .clip(RoundedCornerShape(animatedRadius))
 
-        // Copy of the current photo in the source scale (Crop for the grids, Fit for the review
-        // card): matches the cell/card at the start of the open transition, then fades out as the
-        // photo expands to full-screen. Only composed while the open transition runs, so the
-        // resting preview does not waste a full-screen decode.
         val photoContent: @Composable () -> Unit = {
-            if (morph < 1f) {
-                // Same request key as the source cell/card thumbnail (data + size + frame param),
-                // so this copy is an instant cache hit and the open transition starts from the
-                // already-loaded thumbnail instead of a blank area.
-                val copyRequest = remember(currentPhoto.uri, sourceThumbSize) {
-                    photoThumbRequest(context, currentPhoto, sourceThumbSize)
-                }
-                AsyncImage(
-                    copyRequest,
-                    currentPhoto.displayName,
-                    Modifier.fillMaxSize().alpha(1f - morph),
-                    contentScale = sourceContentScale,
-                )
-            }
             HorizontalPager(
                 state = pagerState,
-                modifier = Modifier.fillMaxSize().alpha(morph),
+                modifier = Modifier.fillMaxSize(),
             ) { page ->
                 val p = openPhotos[page]
-                // The preview's placeholder is the source cell/card thumbnail (same key as the
-                // grid side), so the first open shows it instantly while the full-screen copy
-                // decodes in the background.
+                // The preview's placeholder is the source cell thumbnail (same key as the grid
+                // side), so the first open shows it instantly while the full-screen copy decodes.
                 val placeholder = remember(p.mediaId, sourceThumbSize) {
                     sourceThumbSize?.let { photoThumbRequest(context, p, it) }
                 }
@@ -495,7 +486,6 @@ fun SharedTransitionScope.SharedPhotoPreview(
                 } else {
                     ZoomablePhoto(
                         photo = p,
-                        enabled = !transitionActive,
                         resetTick = zoomResetTick,
                         onResetDone = { if (closePending) onClose(currentPhoto, swipeOut) },
                         placeholderRequest = placeholder,
@@ -545,7 +535,6 @@ fun SharedTransitionScope.SharedPhotoPreview(
                     .fillMaxSize()
                     .then(dragOffset)
                     .then(swipeDownModifier)
-                    .then(sharedModifier)
             ) {
                 photoContent()
             }
@@ -554,6 +543,9 @@ fun SharedTransitionScope.SharedPhotoPreview(
                     .fillMaxSize()
                     .padding(top = statusBarTop)
                     .navigationBarsPadding()
+                    // 打开淡入期间 chrome 先隐藏，淡入结束后再淡入：避免「图片和按钮的
+                    // 上下位置关系」在过渡期间来回变化（bug 3）。
+                    .alpha(chromeRevealAlpha)
             ) {
                 Box(
                     Modifier
@@ -579,7 +571,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
             // the buttons. On swipe-down dismiss the photo slides down while the header slides up
             // and the controls slide down (both driven by effectiveDrag); the controls are drawn
             // after (on top), so the sliding photo passes UNDER them and never blocks the buttons.
-            Column(Modifier.fillMaxSize().systemBarsPadding()) {
+            Column(Modifier.fillMaxSize().systemBarsPadding().alpha(chromeRevealAlpha)) {
                 Box(
                     Modifier
                         .fillMaxWidth()
@@ -593,7 +585,6 @@ fun SharedTransitionScope.SharedPhotoPreview(
                         .weight(1f)
                         .then(dragOffset)
                         .then(swipeDownModifier)
-                        .then(sharedModifier)
                 ) {
                     photoContent()
                 }
