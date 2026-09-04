@@ -90,6 +90,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -134,20 +135,24 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
     // ── 底部 Tab 左右滑动切换(微信式)。page 是唯一状态源,pager 只有两条方向相反的
     //    写入通路,各自的 guard 吸收反向写入,不形成回环、不叠加第二套动画:
     //    1) 滑动:pager.currentPage 越过中线那一帧 → page = 目标 Tab(底部栏选中态随动);
-    //    2) 点击 Tab(page 被直接改写):pager 尚未以该页为目标/当前页时才 animateScrollToPage。
-    //    滑动驱动的 page 更新天然满足 2) 的 guard(滚动中的 targetPage 已是新页)。
+    //    2) 点击 Tab:navigate() 往 tabClicks 投递目标索引,独立长循环里 animateScrollToPage。
+    //    点击动画绝不能放在 LaunchedEffect(page) 里:跨越中间 Tab 的动画途中,通路 1 改写
+    //    page 会重启该效果、取消进行中的动画协程 —— pager 冻结在两页之间(首页⇄设置点切换
+    //    必卡死在中间,即此坑)。channel 串行排队:动画中的再点击接续执行,永不半途取消。
     val pagerState = rememberPagerState(initialPage = tabPages.indexOf(page).coerceAtLeast(0)) { tabPages.size }
+    val tabClicks = remember { Channel<Int>(Channel.CONFLATED) }
+    LaunchedEffect(pagerState) {
+        for (idx in tabClicks) {
+            if (idx < 0) continue // 沉浸页期间 pager 保持原位:总是从当前 Tab 打开,返回露出的就是它
+            if (pagerState.targetPage == idx || pagerState.currentPage == idx) continue
+            pagerState.animateScrollToPage(idx)
+        }
+    }
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage }.collect { idx ->
             val p = tabPages.getOrNull(idx) ?: return@collect
             if (page in tabPages && page != p) page = p
         }
-    }
-    LaunchedEffect(page) {
-        val idx = tabPages.indexOf(page)
-        if (idx < 0) return@LaunchedEffect // 沉浸页期间 pager 保持原位:总是从当前 Tab 打开,返回露出的就是它
-        if (pagerState.targetPage == idx || pagerState.currentPage == idx) return@LaunchedEffect
-        pagerState.animateScrollToPage(idx)
     }
     // 通知/系统闹钟点击后直达整理页(openReviewRequest 由 MainActivity 递增)。冷启动时初始 page
     // 已落在 2 上,这里只负责后续的再次导航;无进行中会话时和首页「开始整理」一样重建一个。
@@ -183,7 +188,10 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
         // Snapshot the Settings scroll position before leaving so it can be restored exactly
         // (the ScrollState alone drifts because it gets clamped before layout on re-entry).
         if (page == 1) savedSettingsScroll = settingsScroll.value
-        if (page != newPage) page = newPage
+        if (page != newPage) {
+            page = newPage
+            tabClicks.trySend(tabPages.indexOf(newPage))
+        }
     }
     PhotoRouletteTheme(dark = isDark, dynamicColor = useDynamic) {
         val dc = designColors()
@@ -243,7 +251,7 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
                         .padding(padding),
                     // 三页全部常驻组合:滑走再滑回时各页滚动/展开状态零丢失,
                     // 邻页也无需在滑动中首次组合(避免掉帧)。
-                    beyondBoundsPageCount = tabPages.lastIndex,
+                    beyondViewportPageCount = tabPages.lastIndex,
                 ) { pagerIndex ->
                     PageContent(
                         page = tabPages[pagerIndex],
@@ -657,6 +665,8 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable private fun RecycleBin(items: List<PhotoEntity>, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
+    // 根节点必须铺不透明 pageBg:Tab 层(pager)常驻垫底,透明根会透出下面的设置页。
+    val dc = designColors()
     var selected by remember { mutableStateOf(setOf<Long>()) }
     var previewIndex by remember { mutableIntStateOf(-1) }
     val previewOpen = previewIndex in items.indices
@@ -688,7 +698,7 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
     // 拖拽经过的中间位置完全不进队列（详见 [GridWindowedThumbnailPreload]）。
     GridWindowedThumbnailPreload(gridState, items, gridThumbSize)
     PhotoSharedTransitionLayout {
-        Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().background(dc.pageBg)) {
             AnimatedContent(
                 targetState = if (previewOpen) previewIndex else null,
                 transitionSpec = {
