@@ -236,8 +236,7 @@ fun ZoomablePhoto(
                             }
                             if (consumed) {
                                 val zoom = event.calculateZoom()
-                                val pan = event.calculatePan()
-                                // Pointer positions are delivered in this image's local
+                                val pan = event.calculatePan()                                // Pointer positions are delivered in this image's local
                                 // coordinates, which the graphicsLayer scale on this same node
                                 // divides by the zoom factor: a screen-space finger move of N px
                                 // arrives as N/scale here. translationX/Y is applied in screen

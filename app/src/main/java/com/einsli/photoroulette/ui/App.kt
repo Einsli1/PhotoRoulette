@@ -546,10 +546,18 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     // 预览的 owned transition 才能 false→true 跑起来触发飞行。
     var previewVisible by remember { mutableStateOf(false) }
     LaunchedEffect(previewOpen) { previewVisible = previewOpen }
-    // 上一次打开/关闭的照片：只有它对应的 cell 在返回飞行期间渲染全屏 Fit 拷贝
-    // （fitOnEnter），并记录关闭时的目标 cell，避免所有 cell 订阅转场状态导致飞行
-    // 期间全量重组。
-    var closedMediaId by remember { mutableLongStateOf(-1L) }
+    // 返回飞行要「起飞」的照片:打开时=点开的那张;关闭流程启动后=屏幕上当前那张
+    // (onCloseStarted 回调刷新)。只有它对应的 cell 渲染全屏 Fit 拷贝(fitOnEnter)。
+    var flyingMediaId by remember { mutableLongStateOf(-1L) }
+    // 本次预览打开的那张(base):预览侧 shared key 钉在它身上;关闭帧「该起飞的 cell」
+    // 的 sharedKey 也要顶成它,才能和预览配对。
+    var openedMediaId by remember { mutableLongStateOf(-1L) }
+    // 关闭流程进行中(requestClose 已触发、visible 尚未翻转):此窗口内把「该起飞的
+    // cell」的 sharedKey 顶成 base key、其余 cell 换成唯一哑 key——翻转瞬间配对双方 =
+    // 预览(base) ↔ 当前 cell(base),只有一次飞行,内容与落点都是当前照片。
+    // 不重排的话,同帧「key 换手 + visible 翻转」会把翻转配到旧 base key 上,base cell
+    // 会跟着起飞(画面变成点开的那张),当前 cell 只能拿到退化匹配在自己格子里 morph。
+    var closing by remember { mutableStateOf(false) }
     // Page-level back returns to Settings. While the preview is open, SharedPhotoPreview's own
     // BackHandler (composed later) wins and closes the preview first.
     BackHandler(onBack = onBack)
@@ -672,18 +680,31 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                                     detectTapGestures(
                                                         onTap = {
                                                             previewSession++
-                                                            closedMediaId = photo.mediaId
+                                                            flyingMediaId = photo.mediaId
+                                                            openedMediaId = photo.mediaId
+                                                            closing = false
                                                             previewIndex = index
                                                         },
                                                         onLongPress = { selected = if (liveChecked) selected - photo.mediaId else selected + photo.mediaId }
                                                     )
                                                 }
                                         ) {
+                                            // 关闭帧的 sharedKey 重排:该起飞的 cell 顶上 base key
+                                            // (和预览配对),其余 cell 换成唯一哑 key(防 cell 互配)。
+                                            val cellSharedKey = when {
+                                                closing -> if (photo.mediaId == flyingMediaId) {
+                                                    photoSharedKey(openedMediaId)
+                                                } else {
+                                                    "trashDummy" + photo.mediaId
+                                                }
+                                                else -> photoSharedKey(photo.mediaId)
+                                            }
                                             SharedGridImage(
                                                 photo, 8.dp, Modifier.fillMaxSize(),
                                                 gridSize = gridThumbSize,
+                                                sharedKey = cellSharedKey,
                                                 // 只有正在飞回的那张 cell 订阅转场状态并渲染全屏 Fit 拷贝。
-                                                fitOnEnter = photo.mediaId == closedMediaId,
+                                                fitOnEnter = photo.mediaId == flyingMediaId,
                                                 // 预览打开期间 cell 退出「目标态」竞争：飞行目标只能有一个。
                                                 sharedVisible = !previewOpen,
                                             )
@@ -738,13 +759,20 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                         doubleTapToZoom = true,
                         cellCornerRadius = 8.dp,
                         active = previewOpen,
+                        onCloseStarted = { currentMediaId ->
+                            // 关闭流程启动(缩放回位之前):记住要起飞的当前照片,并把 cell 的
+                            // sharedKey 重排好(当前 cell 顶 base key、其余下线)——必须赶在
+                            // visible 翻转之前完成。
+                            flyingMediaId = currentMediaId
+                            closing = true
+                        },
                         onClose = { current, viaSwipeDown ->
                             scope.launch {
                                 // 正常关闭（侧滑/系统返回/关闭按钮）：先记录目标照片并让它的
                                 // cell 进入 viewport（若在屏幕外），返回飞行才能从全屏连续缩回
                                 // 正确的宫格位置；下滑划走式关闭照片已滑出屏幕，直接关 overlay。
                                 if (!viaSwipeDown) {
-                                    closedMediaId = current.mediaId
+                                    flyingMediaId = current.mediaId
                                     val idx = items.indexOfFirst { it.mediaId == current.mediaId }
                                     if (idx >= 0) revealGridItemIfOffscreen(gridState, idx)
                                 }
@@ -1584,7 +1612,10 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     var previewVisible by remember { mutableStateOf(false) }
     LaunchedEffect(previewOpen) { previewVisible = previewOpen }
     // 上一次打开/关闭的照片：只有它对应的 cell 在返回飞行期间渲染全屏 Fit 拷贝（同回收站）。
-    var closedMediaId by remember { mutableLongStateOf(-1L) }
+    var flyingMediaId by remember { mutableLongStateOf(-1L) }
+    var openedMediaId by remember { mutableLongStateOf(-1L) }
+    // 关闭流程进行中（同回收站）：把「该起飞的 cell」的 sharedKey 顶成 base key、其余下线。
+    var closing by remember { mutableStateOf(false) }
     // Cell-sized decode target for the 3-column memory grid (same trick as RecycleBin).
     val gridCellPx = with(LocalDensity.current) {
         (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
@@ -1670,14 +1701,20 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                                 .background(dc.white)
                                                 .clickable {
                                                     previewSession++
-                                                    closedMediaId = photo.mediaId
+                                                    flyingMediaId = photo.mediaId; openedMediaId = photo.mediaId; closing = false
                                                     previewIndex = index
                                                 }
                                         ) {
                                             SharedGridImage(
                                                 photo, 12.dp, Modifier.fillMaxSize(),
                                                 gridSize = gridThumbSize,
-                                                fitOnEnter = photo.mediaId == closedMediaId,
+                                                // 关闭帧的 sharedKey 重排(同回收站):该起飞的 cell
+                                                // 顶上 base key,其余 cell 换成唯一哑 key。
+                                                sharedKey = if (closing) {
+                                                    if (photo.mediaId == flyingMediaId) photoSharedKey(openedMediaId)
+                                                    else "memoryDummy" + photo.mediaId
+                                                } else photoSharedKey(photo.mediaId),
+                                                fitOnEnter = photo.mediaId == flyingMediaId,
                                                 sharedVisible = !previewOpen,
                                             )
                                             VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
@@ -1707,13 +1744,19 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                         tapToToggleChrome = true,
                         doubleTapToZoom = true,
                         cellCornerRadius = 12.dp,
+                         onCloseStarted = { currentMediaId ->
+                             // 同回收站:关闭流程启动时记住要起飞的当前照片并重排 cell key,
+                             // 必须赶在 visible 翻转之前完成。
+                             flyingMediaId = currentMediaId
+                             closing = true
+                         },
                         active = previewOpen,
                         onClose = { current, viaSwipeDown ->
                             scope.launch {
                                 // 正常关闭先让目标 cell 进入 viewport（若在屏幕外），返回飞行
                                 // 才能从全屏连续缩回正确的宫格位置；下滑划走式直接关 overlay。
                                 if (!viaSwipeDown) {
-                                    closedMediaId = current.mediaId
+                                    flyingMediaId = current.mediaId
                                     val idx = photos.indexOfFirst { it.mediaId == current.mediaId }
                                     if (idx >= 0) revealGridItemIfOffscreen(gridState, idx)
                                 }

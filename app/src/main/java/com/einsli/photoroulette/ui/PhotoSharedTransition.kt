@@ -95,8 +95,8 @@ object PhotoAspectCache {
  *  (aspect = w/h)放入 1:1 的盒子:Crop 缩放 = Fit 缩放 × max(aspect, 1/aspect)。 */
 internal fun cropToFitRatio(aspect: Float): Float = maxOf(aspect, 1f / aspect)
 
-/** Duration and easing shared by the bounds animation and the corner-radius animation. */
-internal const val PhotoTransitionMillis = 250   // 第 99 行，一处生效
+/** Duration and easing shared by the bounds animation, the content zoom and the corner radius. */
+internal const val PhotoTransitionMillis = 250
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 internal val PhotoBoundsTransform: BoundsTransform = BoundsTransform { _, _ ->
@@ -178,6 +178,9 @@ fun SharedTransitionScope.SharedGridImage(
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
     gridSize: CoilSize? = null,
+    /** 覆盖本 cell 的 shared key。默认 = 自身 mediaId;关闭流程中调用方会把「该起飞的 cell」
+     *  顶成 base key、其余 cell 换成唯一哑 key,保证返回飞行只配对到当前 cell。 */
+    sharedKey: String = photoSharedKey(photo.mediaId),
     /** Only the cell a photo is flying back to needs the full-screen Fit copy while the return
      *  transition runs (it is the incoming side, so its layer is what the overlay draws at the
      *  animated bounds); the other cells just keep their Crop thumbnails. Rendering a
@@ -189,7 +192,7 @@ fun SharedTransitionScope.SharedGridImage(
      *  visible" shared element — only the preview side may claim the flight target. */
     sharedVisible: Boolean = true,
 ) {
-    val state = rememberSharedContentState(photoSharedKey(photo.mediaId))
+    val state = rememberSharedContentState(sharedKey)
     val context = LocalContext.current
     val previewSize = rememberScreenPixelSize()
     // A flight targeting this cell: a match exists (preview open on this photo) AND a shared
@@ -204,7 +207,7 @@ fun SharedTransitionScope.SharedGridImage(
     val morph = remember { Animatable(0f) }
     LaunchedEffect(flightActive) {
         if (flightActive) {
-            // 返回方向必须与边框同速(300ms):内容「回裁」是放大,若比边框缩小快,返回一开始
+            // 返回方向必须与边框同速:内容「回裁」是放大,若比边框缩小快,返回一开始
             // 会先快速放大裁回一下再缩小,读作一次「跳跃」。
             morph.animateTo(1f, tween(PhotoTransitionMillis, easing = FastOutSlowInEasing))
         } else {
@@ -330,6 +333,10 @@ fun SharedTransitionScope.SharedPhotoPreview(
     photos: List<PhotoEntity>,
     initialIndex: Int,
     onClose: (PhotoEntity, viaSwipeDown: Boolean) -> Unit,
+    /** 关闭流程刚启动(requestClose,缩放回位之前)回调,携带当前照片 mediaId。调用方用它
+     *  把「当前 cell 的 sharedKey 顶成 base key、其余 cell 下线」,让返回飞行的配对双方
+     *  为 预览(base) ↔ 当前 cell(base)。必须在 visible 翻转之前至少一帧完成。 */
+    onCloseStarted: (Long) -> Unit = {},
     modifier: Modifier = Modifier,
     swipeDownToClose: Boolean = false,
     /** 预览 overlay 是否处于打开态（调用方用 AnimatedVisibility(visible=...) 驱动时传入）。
@@ -364,12 +371,29 @@ fun SharedTransitionScope.SharedPhotoPreview(
     val density = LocalDensity.current
     // 状态栏高度在进入预览时固定捕获：状态栏隐藏时 chrome/时间戳不会跳位。
     val statusBarTop = rememberStatusBarTop()
-    // Shared element: key = the CURRENT pager page's photo, so swiping pages only swaps the key
-    // (no new transition starts: with caller-managed visibility nothing re-runs while the
-    // visible flag stays true) and closing returns the photo actually on screen. During a
-    // swipe-out the modifier is removed entirely so the photo keeps sliding out via dragY
-    // instead of being yanked into a return flight.
-    val sharedState = rememberSharedContentState(photoSharedKey(currentPhoto.mediaId))
+    // Shared element key 的两条规则(实测踩坑:见下方 deferred 说明):
+    // 1) 预览打开期间 key 钉死在「本次打开的那张照片」上——翻页绝不换 key。若 key 跟着
+    //    currentPage 在 settle 中途换成新照片,新 key 会以「可见」注册并匹配到宫格 cell,
+    //    触发一次毫无意义的 become-visible 飞行;该飞行把包着 pager 的容器按动画尺寸反复
+    //    重新测量,pager 视口随之缩放、snap 重算,于是每次翻页都多跳一页(切两张+放大动画)。
+    // 2) 关闭(active→false)那一帧才把 key 换成屏幕上当前的照片——与 visible→false 同帧,
+    //    新 key 以「不可见」注册,不会触发飞行;此刻 cell 侧 sharedVisible 翻 true,由 cell
+    //    触发正常的返回飞行,精准落回当前照片的格子。
+    // During a swipe-out the modifier is removed entirely so the photo keeps sliding out via
+    // dragY instead of being yanked into a return flight.
+    // 会话基准照片:整个预览生命周期(含关闭)shared key 永远钉在它身上,绝不换 key。
+    // remember 不带 key:关闭时 initialIndex 会被调用方置 -1,带 key 会让基准在关闭帧
+    // 重算成 items[0] 造成 key 跳变。实例本身随 previewSession 每次打开全新创建。
+    val sessionBasePhoto = remember {
+        openPhotos.getOrNull(initialIndex.coerceIn(0, (openPhotos.size - 1).coerceAtLeast(0)))
+            ?: openPhotos.firstOrNull()
+            ?: currentPhoto
+    }
+    // 关闭时也不把 key 换成当前照片:同帧「key 换手 + visible 翻转」会被系统把翻转配对到
+    // 旧 key 上,base cell 会跟着起飞(画面变成点开的那张)。正确的目标配对由调用方在
+    // [onCloseStarted] 时把「当前 cell 的 sharedKey 顶成 base key、其余 cell 下线」来完成,
+    // 翻转瞬间配对双方 = 预览(base) ↔ 当前 cell(base),唯一一次飞行、内容与落点都正确。
+    val sharedState = rememberSharedContentState(photoSharedKey(sessionBasePhoto.mediaId))
     // 打开飞行期间圆角从 cell 半径收敛到 0；关闭飞行由 cell 自己的 clip 负责，预览侧不再渲染。
     val flightVisible = active && !swipeOut
     // 打开方向的内容缩放/圆角 morph:0=Crop(圆角=cell 半径)、1=Fit(圆角=0)。预览一合成就
@@ -455,6 +479,9 @@ fun SharedTransitionScope.SharedPhotoPreview(
     fun requestClose() {
         if (closePending) return
         closePending = true
+        // 先让调用方重排 cell 的 sharedKey(当前 cell 顶上 base key),必须发生在
+        // zoomReset → onClose → visible 翻转之前,配对才落到当前 cell 上。
+        onCloseStarted(currentPhoto.mediaId)
         // Bump the tick: the current page's ZoomablePhoto animates back to 1x and then calls
         // onResetDone → onClose(currentPhoto, swipeOut).
         zoomResetTick++
