@@ -78,6 +78,23 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalSharedTransitionApi::class)
 fun photoSharedKey(mediaId: Long): String = "photo-$mediaId"
 
+/**
+ * 进程内照片宽高比(w/h)缓存:任何缩略图解码时(宫格滚动/预载/预览)写入。它存活于 shared-layout
+ * 的重 key 与页面切换,让预览在打开瞬间就能同步拿到 Crop↔Fit 的缩放比——而不是等一次解码
+ * (否则首帧会闪一帧 Fit 渲染,正是本次要消除的突变)。
+ */
+object PhotoAspectCache {
+    private val map = HashMap<Long, Float>()
+    fun put(mediaId: Long, aspect: Float) {
+        if (aspect.isFinite() && aspect > 0f) map[mediaId] = aspect
+    }
+    fun get(mediaId: Long): Float? = map[mediaId]
+}
+
+/** 在**方形宫格**里,ContentScale.Crop 比 ContentScale.Fit 放大多少倍。对 w×h 的图
+ *  (aspect = w/h)放入 1:1 的盒子:Crop 缩放 = Fit 缩放 × max(aspect, 1/aspect)。 */
+internal fun cropToFitRatio(aspect: Float): Float = maxOf(aspect, 1f / aspect)
+
 /** Duration and easing shared by the bounds animation and the corner-radius animation. */
 internal const val PhotoTransitionMillis = 300
 
@@ -139,10 +156,11 @@ fun PhotoSharedTransitionLayout(
  *
  * During a shared transition only the *incoming* shared element is rendered in the overlay — the
  * cell on return — animating from the other side's bounds (the full-screen preview) down to this
- * cell. To avoid the full-screen Crop flash it therefore crossfades from Fit (matching the
- * preview at the start) to [contentScale] (Crop by default, the cell's resting look) as the
- * return flight runs. [fitOnEnter] gates the per-frame subscription to the transition state to
- * just the returning cell, so the other cells stay static during the flight.
+ * cell. To avoid the full-screen Crop flash it therefore renders the full-screen Fit copy (matching
+ * the preview at the start) and zooms it IN to Crop (scale = [cropToFitRatio]) as the photo lands —
+ * the exact reverse of the open flight, no crossfade. [fitOnEnter] gates the per-frame subscription
+ * to the transition state to just the returning cell, so the other cells stay static during the
+ * flight.
  *
  * The resting cell loads a small Crop thumbnail. The full-screen Fit copy is composed only
  * while a flight targeting this cell is running and reuses the preview's screen-size cache
@@ -179,11 +197,10 @@ fun SharedTransitionScope.SharedGridImage(
     // per-frame animation — gated by fitOnEnter so only the returning cell recomposes each
     // flight frame (a 60ms+ frame budget on the trash grid otherwise).
     val flightActive = fitOnEnter && state.isMatchFound && isTransitionActive
-    // Fit → Crop crossfade progress: rests at 0, animates 0→1 in step with the flight (same
-    // duration/easing). Resting at 0 is important: on the flight's FIRST frame the Fit copy is
-    // already composed at alpha=1 (morph still 0), so the overlay never shows the full-screen
-    // Crop thumbnail for a frame (pit 9's Crop flash); the Crop thumbnail fades in as the photo
-    // lands. When the flight is over, morph snaps back to 0.
+    // Fit → Crop zoom progress: rests at 0, animates 0→1 in step with the flight (same
+    // duration/easing). At 0 the Fit copy renders at scale 1 (identical to the preview at
+    // full-screen), at 1 it has zoomed to scale cropRatio (Crop). When the flight is over,
+    // morph snaps back to 0.
     val morph = remember { Animatable(0f) }
     LaunchedEffect(flightActive) {
         if (flightActive) {
@@ -192,6 +209,10 @@ fun SharedTransitionScope.SharedGridImage(
             morph.snapTo(0f)
         }
     }
+    // 返回飞行的 Crop→Fit 缩放比(方形宫格)。从宽高比缓存同步读取(缩略图解码时已写入),
+    // 不存在首帧解码竞态。
+    val aspect = remember(photo.mediaId) { PhotoAspectCache.get(photo.mediaId) }
+    val cropRatio = aspect?.let { cropToFitRatio(it) } ?: 1f
     // Resting thumbnail: fixed cell-size request (when [gridSize] is provided) so grid scrolling
     // decodes only the small bitmap and hits a stable memory-cache entry. Fades in on success.
     val thumbRequest = remember(photo.uri, gridSize) { photoThumbRequest(context, photo, gridSize) }
@@ -205,6 +226,12 @@ fun SharedTransitionScope.SharedGridImage(
         onSuccess = { state ->
             thumbReady = true
             thumbSnap = state.result.dataSource == DataSource.MEMORY_CACHE
+            // 缩略图解码即写入宽高比:预览打开瞬间即可拿到 Crop↔Fit 缩放比(缩略图与原图
+            // 等比例,aspect 一致)。
+            val d = state.result.drawable
+            if (d.intrinsicWidth > 0 && d.intrinsicHeight > 0) {
+                PhotoAspectCache.put(photo.mediaId, d.intrinsicWidth.toFloat() / d.intrinsicHeight.toFloat())
+            }
         },
         contentScale = contentScale,
     )
@@ -229,8 +256,9 @@ fun SharedTransitionScope.SharedGridImage(
         // Fit copy: only composed for the returning cell while its return flight runs
         // (flightActive && morph < 1). It uses the same fixed screen-size request as the
         // preview, so it hits the preview's memory-cache entry immediately instead of
-        // re-decoding. At rest it is not composed, so fast grid scrolling only decodes the
-        // small Crop thumbnail below.
+        // re-decoding. It starts as Fit (scale 1, identical to the preview at full-screen) and
+        // zooms IN to Crop (scale = cropRatio) as the photo lands — the exact reverse of the
+        // open flight, no crossfade.
         if (flightActive && morph.value < 1f) {
             AsyncImage(
                 model = remember(photo.uri, previewSize) {
@@ -239,18 +267,23 @@ fun SharedTransitionScope.SharedGridImage(
                     }.build()
                 },
                 contentDescription = photo.displayName,
-                modifier = Modifier.fillMaxSize().alpha(1f - morph.value),
+                modifier = Modifier.fillMaxSize().graphicsLayer {
+                    val s = 1f + (cropRatio - 1f) * morph.value
+                    scaleX = s
+                    scaleY = s
+                },
                 contentScale = ContentScale.Fit,
             )
         }
-        // Crop copy: the resting thumbnail (cell size). During the flight it fades in over the
-        // Fit copy as the photo lands; at rest it is the only visible layer.
+        // Crop copy: the resting thumbnail (cell size). Hidden while the Fit copy is up — its
+        // transparent letterbox areas would otherwise reveal the Crop image beneath mid-flight —
+        // and revealed the instant the flight ends (the Fit copy has zoomed to Crop by then).
         androidx.compose.foundation.Image(
             painter = thumbPainter,
             contentDescription = photo.displayName,
             modifier = Modifier
                 .fillMaxSize()
-                .alpha(if (flightActive) morph.value * thumbAlpha else thumbAlpha),
+                .alpha(if (flightActive && morph.value < 1f) 0f else thumbAlpha),
             contentScale = contentScale,
         )
     }
@@ -337,11 +370,19 @@ fun SharedTransitionScope.SharedPhotoPreview(
     val sharedState = rememberSharedContentState(photoSharedKey(currentPhoto.mediaId))
     // 打开飞行期间圆角从 cell 半径收敛到 0；关闭飞行由 cell 自己的 clip 负责，预览侧不再渲染。
     val flightVisible = active && !swipeOut
-    val cornerProgress by animateFloatAsState(
-        targetValue = if (flightVisible) 1f else 0f,
-        animationSpec = tween(PhotoTransitionMillis, easing = FastOutSlowInEasing),
-        label = "previewCorner",
-    )
+    // 打开方向的内容缩放/圆角 morph:0=Crop(圆角=cell 半径)、1=Fit(圆角=0)。预览一合成就
+    // snap 到 0(首帧与宫格完全一致,消除 Crop→Fit 突变 + 直角盖圆角),随后与 bounds 飞行
+    // 同步地连续缩放到 Fit、圆角收敛到 0。关闭时 snap 回 1,返回方向的 Crop 化/圆角由宫格侧
+    // SharedGridImage 的 morph 与 clip 承担(预览作为退场元素淡出即可)。
+    val contentMorph = remember { Animatable(0f) }
+    LaunchedEffect(active) {
+        if (active) {
+            contentMorph.snapTo(0f)
+            contentMorph.animateTo(1f, tween(PhotoTransitionMillis, easing = FastOutSlowInEasing))
+        } else {
+            contentMorph.snapTo(1f)
+        }
+    }
     val sharedModifier: Modifier =
         if (swipeOut) {
             Modifier
@@ -352,7 +393,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
                     visible = flightVisible,
                     boundsTransform = PhotoBoundsTransform,
                 )
-                .clip(RoundedCornerShape(cellCornerRadius * (1f - cornerProgress)))
+                .clip(RoundedCornerShape(cellCornerRadius * (1f - contentMorph.value)))
         }
     val dismissThreshold = with(density) { 96.dp.toPx() }
     val effectiveDrag = dragY
@@ -522,6 +563,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
                         placeholderRequest = placeholder,
                         onTap = { if (tapToToggleChrome) chromeHidden = !chromeHidden },
                         doubleTapZoom = doubleTapToZoom,
+                        cropFitProgress = contentMorph.value,
                     )
                 }
             }

@@ -64,6 +64,9 @@ fun ZoomablePhoto(
     placeholderRequest: ImageRequest? = null,
     onTap: () -> Unit = {},
     doubleTapZoom: Boolean = false,
+    /** 1 = 纯 Fit(静止态);0 = 纯 Crop(打开飞行的起点)。打开时 0→1 连续缩放,把 Fit 图从
+     *  Crop 缩回 Fit(消除首帧 Crop→Fit 突变)。由 SharedPhotoPreview 的 contentMorph 驱动。 */
+    cropFitProgress: Float = 1f,
 ) {
     var scale by remember(photo.mediaId) { mutableFloatStateOf(1f) }
     var offsetX by remember(photo.mediaId) { mutableFloatStateOf(0f) }
@@ -120,6 +123,11 @@ fun ZoomablePhoto(
     val request = remember(photo.uri, previewSize) {
         ImageRequest.Builder(context).data(photo.uri).size(previewSize).build()
     }
+    // Crop↔Fit 缩放比(方形宫格):把 Fit 图额外放大 cropRatio 倍即等于 Crop。aspect 来自
+    // 解码缓存(宫格缩略图解码时已写入),取不到则退化为 1(纯 Fit,无 morph)。
+    val aspect = remember(photo.mediaId) { PhotoAspectCache.get(photo.mediaId) }
+    val cropRatio = aspect?.let { cropToFitRatio(it) } ?: 1f
+    val cropFitScale = 1f + (cropRatio - 1f) * (1f - cropFitProgress)
 
     // Close flow: animate back to the base (1x, centered) state before the shared element
     // takes over, so the return transition never starts from a user transform.
@@ -152,7 +160,15 @@ fun ZoomablePhoto(
             var placeholderReady by remember(photo.mediaId, placeholderRequest) { mutableStateOf(false) }
             val placeholderPainter = rememberAsyncImagePainter(
                 placeholderRequest,
-                onSuccess = { placeholderReady = true },
+                onSuccess = {
+                    placeholderReady = true
+                    // 备份写入宽高比:极端情况下宫格侧尚未解码就打开了预览,这里补上,让后续
+                    // 关闭/再次打开也能拿到正确缩放比。
+                    val d = it.result.drawable
+                    if (d.intrinsicWidth > 0 && d.intrinsicHeight > 0) {
+                        PhotoAspectCache.put(photo.mediaId, d.intrinsicWidth.toFloat() / d.intrinsicHeight.toFloat())
+                    }
+                },
                 contentScale = ContentScale.Fit,
             )
             val placeholderAlpha by animateFloatAsState(
@@ -166,7 +182,7 @@ fun ZoomablePhoto(
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
-                        scaleX = scale; scaleY = scale
+                        scaleX = scale * cropFitScale; scaleY = scale * cropFitScale
                         translationX = offsetX; translationY = offsetY
                     }
                     .alpha(placeholderAlpha),
@@ -188,7 +204,7 @@ fun ZoomablePhoto(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    scaleX = scale; scaleY = scale
+                    scaleX = scale * cropFitScale; scaleY = scale * cropFitScale
                     translationX = offsetX; translationY = offsetY
                 }
                 .alpha(fullAlpha)
