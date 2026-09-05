@@ -2,17 +2,14 @@ package com.einsli.photoroulette.ui
 
 import android.app.Activity
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.BoundsTransform
-import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
-import androidx.compose.animation.core.animateDp
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -125,18 +122,31 @@ fun PhotoSharedTransitionLayout(
 }
 
 /**
- * Grid-side shared element, composed inside the AnimatedContent's grid branch. The corner
- * radius is animated by the branch transition (see [photoBranchRadius]) and the photo is matched
- * to the preview by [photoSharedKey].
+ * Grid-side shared element, composed in the always-composed page layer (AnimatedVisibility
+ * (visible=true) only provides structure, never a running transition).
  *
- * During a shared transition only the *incoming* shared element is rendered (the grid on return),
- * animating from the other side's bounds (the full-screen preview) down to this cell. To avoid the
- * full-screen Crop flash it therefore crossfades from Fit (matching the preview at the start) to
- * [contentScale] (Crop by default, the cell's resting look) as the grid branch enters.
+ * The shared element system here is driven by **caller-managed visibility** — see
+ * [SharedTransitionScope.sharedElementWithCallerManagedVisibility]: the cell's [sharedVisible]
+ * must flip to false while the preview is open (the caller passes `!previewOpen`), so the cell
+ * exits the "becoming visible" race. Exactly ONE side (the preview while opening, this cell
+ * while returning) has `target == true` at a time; otherwise the measure-order race between the
+ * cell and the overlay would repeatedly re-target the flight and the photo gets stuck at the
+ * source bounds (the failure mode of the previous attempt, commit 36063d0's predecessor).
+ *
+ * The corner radius is applied as a child of the shared element so it is part of the recorded
+ * overlay layer during the flight: the returning photo keeps the cell's rounded corners as it
+ * lands.
+ *
+ * During a shared transition only the *incoming* shared element is rendered in the overlay — the
+ * cell on return — animating from the other side's bounds (the full-screen preview) down to this
+ * cell. To avoid the full-screen Crop flash it therefore crossfades from Fit (matching the
+ * preview at the start) to [contentScale] (Crop by default, the cell's resting look) as the
+ * return flight runs. [fitOnEnter] gates the per-frame subscription to the transition state to
+ * just the returning cell, so the other cells stay static during the flight.
  *
  * The resting cell loads a small Crop thumbnail. The full-screen Fit copy is composed only
- * while the return transition is running and reuses the preview's screen-size cache entry, so the
- * grid stays cheap to scroll and the return has no decode flash.
+ * while a flight targeting this cell is running and reuses the preview's screen-size cache
+ * entry, so the grid stays cheap to scroll and the return has no decode flash.
  *
  * [gridSize] fixes the decode size for the resting thumbnail (in pixels). Passing the cell size
  * makes grid scrolling decode small bitmaps only — fast to load and one stable memory-cache entry
@@ -147,35 +157,41 @@ fun PhotoSharedTransitionLayout(
 fun SharedTransitionScope.SharedGridImage(
     photo: PhotoEntity,
     animatedRadius: Dp,
-    animatedVisibilityScope: AnimatedVisibilityScope,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
     gridSize: CoilSize? = null,
-    /** When the caller keeps the grid always composed (RecycleBin / MemoryViewer, where the page
-     *  is revealed behind the preview), it passes its own Fit→Crop morph here so the return
-     *  flight still starts Fit. Null keeps the branch-transition-driven morph. */
-    morphOverride: Float? = null,
-    /** Only the cell the closed photo is flying back to needs the full-screen Fit copy while the
-     *  branch enters; the other cells just fade in their Crop thumbnails. Rendering a screen-size
-     *  AsyncImage for EVERY visible cell made the return's first frame stall (~100ms). */
+    /** Only the cell a photo is flying back to needs the full-screen Fit copy while the return
+     *  transition runs (it is the incoming side, so its layer is what the overlay draws at the
+     *  animated bounds); the other cells just keep their Crop thumbnails. Rendering a
+     *  screen-size AsyncImage for EVERY visible cell made the return's first frame stall
+     *  (~100ms), and subscribing every cell to the per-frame transition state recomposed the
+     *  whole grid each flight frame. */
     fitOnEnter: Boolean = true,
+    /** Must be `!previewOpen`: while the preview is open the cell must NOT be a "becoming
+     *  visible" shared element — only the preview side may claim the flight target. */
+    sharedVisible: Boolean = true,
 ) {
     val state = rememberSharedContentState(photoSharedKey(photo.mediaId))
     val context = LocalContext.current
     val previewSize = rememberScreenPixelSize()
-    // While the grid branch is entering (the return transition) this goes 0 → 1 in step with the
-    // shared-element bounds animation. The shared element is the ONLY thing rendered during the
-    // transition and it animates from the preview's full-screen bounds down to this cell, so it
-    // must render Fit at the start (to match the preview) and Crop at the end (to match the cell).
-    val transitionMorph by animatedVisibilityScope.transition.animateFloat(
-        transitionSpec = { tween(PhotoTransitionMillis, easing = FastOutSlowInEasing) },
-        label = "gridMorph",
-    ) { s -> if (s == EnterExitState.Visible) 1f else 0f }
-    // Only the returning cell reads the transition (recomposing every frame); the other cells
-    // stay static at morph=1. Reading the delegated state is what subscribes a cell to the
-    // per-frame animation — without this gate every visible cell recomposed each flight frame
-    // (a 60ms+ frame budget on the trash grid).
-    val morph = if (fitOnEnter) (morphOverride ?: transitionMorph) else 1f
+    // A flight targeting this cell: a match exists (preview open on this photo) AND a shared
+    // transition is running. Reading these states is what subscribes this cell to the
+    // per-frame animation — gated by fitOnEnter so only the returning cell recomposes each
+    // flight frame (a 60ms+ frame budget on the trash grid otherwise).
+    val flightActive = fitOnEnter && state.isMatchFound && isTransitionActive
+    // Fit → Crop crossfade progress: rests at 0, animates 0→1 in step with the flight (same
+    // duration/easing). Resting at 0 is important: on the flight's FIRST frame the Fit copy is
+    // already composed at alpha=1 (morph still 0), so the overlay never shows the full-screen
+    // Crop thumbnail for a frame (pit 9's Crop flash); the Crop thumbnail fades in as the photo
+    // lands. When the flight is over, morph snaps back to 0.
+    val morph = remember { Animatable(0f) }
+    LaunchedEffect(flightActive) {
+        if (flightActive) {
+            morph.animateTo(1f, tween(PhotoTransitionMillis, easing = FastOutSlowInEasing))
+        } else {
+            morph.snapTo(0f)
+        }
+    }
     // Resting thumbnail: fixed cell-size request (when [gridSize] is provided) so grid scrolling
     // decodes only the small bitmap and hits a stable memory-cache entry. Fades in on success.
     val thumbRequest = remember(photo.uri, gridSize) { photoThumbRequest(context, photo, gridSize) }
@@ -199,9 +215,9 @@ fun SharedTransitionScope.SharedGridImage(
     ).value
     Box(
         modifier
-            .sharedElement(
+            .sharedElementWithCallerManagedVisibility(
                 state,
-                animatedVisibilityScope,
+                visible = sharedVisible,
                 boundsTransform = PhotoBoundsTransform,
             )
             .clip(RoundedCornerShape(animatedRadius))
@@ -210,11 +226,12 @@ fun SharedTransitionScope.SharedGridImage(
         if (!thumbReady) {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant))
         }
-        // Fit copy: only composed for the returning cell while the return transition runs
-        // (morph < 1). It uses the same fixed screen-size request as the preview, so it hits the
-        // preview's memory-cache entry immediately instead of re-decoding. At rest it is not
-        // composed, so fast grid scrolling only decodes the small Crop thumbnail below.
-        if (morph < 1f && fitOnEnter) {
+        // Fit copy: only composed for the returning cell while its return flight runs
+        // (flightActive && morph < 1). It uses the same fixed screen-size request as the
+        // preview, so it hits the preview's memory-cache entry immediately instead of
+        // re-decoding. At rest it is not composed, so fast grid scrolling only decodes the
+        // small Crop thumbnail below.
+        if (flightActive && morph.value < 1f) {
             AsyncImage(
                 model = remember(photo.uri, previewSize) {
                     ImageRequest.Builder(context).data(photo.uri).size(previewSize).apply {
@@ -222,55 +239,46 @@ fun SharedTransitionScope.SharedGridImage(
                     }.build()
                 },
                 contentDescription = photo.displayName,
-                modifier = Modifier.fillMaxSize().alpha(1f - morph),
+                modifier = Modifier.fillMaxSize().alpha(1f - morph.value),
                 contentScale = ContentScale.Fit,
             )
         }
-        // Crop copy: the resting thumbnail (cell size), fades in as the photo lands.
+        // Crop copy: the resting thumbnail (cell size). During the flight it fades in over the
+        // Fit copy as the photo lands; at rest it is the only visible layer.
         androidx.compose.foundation.Image(
             painter = thumbPainter,
             contentDescription = photo.displayName,
-            modifier = Modifier.fillMaxSize().alpha(morph * thumbAlpha),
+            modifier = Modifier
+                .fillMaxSize()
+                .alpha(if (flightActive) morph.value * thumbAlpha else thumbAlpha),
             contentScale = contentScale,
         )
     }
 }
 
 /**
- * Corner radius for one AnimatedContent branch, driven by the branch's enter/exit transition so
- * it stays in sync with the shared-element bounds animation:
- * - grid side: cell radius at rest / while entering, 0 while exiting (the cell opens up);
- * - preview side: 0 at rest / while entering, cell radius while exiting (corners return).
- */
-@Composable
-internal fun AnimatedVisibilityScope.photoBranchRadius(
-    gridCornerRadius: Dp,
-    gridSide: Boolean,
-): Dp {
-    val radius by transition.animateDp(
-        transitionSpec = { tween(PhotoTransitionMillis, easing = FastOutSlowInEasing) },
-        label = if (gridSide) "gridCorner" else "previewCorner",
-    ) { state ->
-        if (gridSide) {
-            if (state == EnterExitState.Visible) gridCornerRadius else 0.dp
-        } else {
-            if (state == EnterExitState.Visible) 0.dp else gridCornerRadius
-        }
-    }
-    return radius
-}
-
-/**
  * Full-screen preview overlay, composed inside the caller's AnimatedVisibility overlay branch
  * and layered ABOVE the caller's always-composed page.
  *
- * NOTE: this overlay does NOT participate in the shared-element system. The page layer's cells
- * stay in their own AnimatedVisibility(visible=true) scope; the flying photo would need the
- * shared-transition machinery to start a bounds animation between two scopes, but in Compose
- * 1.7.6 that flight never starts reliably when the source scope never exits (BoundsAnimation.
- * animate() only fires while isTransitionActive is true, which is driven by running scope
- * transitions — the always-composed page has none). Photos therefore appear full-screen directly
- * (fade in with the overlay) instead of being stuck at the source cell bounds.
+ * The photo area participates in the shared-element system via
+ * [SharedTransitionScope.sharedElementWithCallerManagedVisibility] with the CURRENT pager
+ * page's photo as the key, so swiping pages only swaps the key without retriggering a
+ * transition and closing returns the photo that is actually on screen back to its own grid cell.
+ * The key is the stable mediaId ([photoSharedKey]), never the pager index — paging or deleting
+ * mid-preview would otherwise mis-match cells (pit 12).
+ *
+ * Opening: the overlay (scrim/chrome) fades in while the photo continuously grows from the
+ * clicked cell's bounds to full-screen (300ms, [PhotoBoundsTransform]) — the user only ever
+ * sees one photo, starting exactly at the cell it was tapped in. The header/buttons stay
+ * hidden until the flight finishes, then fade in. Closing: first any pinch-zoom snaps back to
+ * 1x, then the overlay fades out while the photo continuously shrinks back and lands exactly
+ * in the source cell (the caller scrolls the grid so the cell is composed before the exit
+ * starts — [revealGridItemIfOffscreen] in App.kt).
+ *
+ * Two close styles:
+ * - 下滑提交(拖过阈值): 照片从松手位置顺势下滑出屏,页面原样露出。预览侧摘掉
+ *   sharedElement —— 返回转场没有匹配,照片不缩回宫格,而是由 dragY 驱动滑出屏幕。
+ * - 侧滑/系统返回/关闭按钮: 照片经 shared element 连续缩放回位到宫格 cell。
  *
  * The black scrim covers the real page beneath and fades as the photo is dragged down — the
  * page behind brightens from dark.
@@ -278,19 +286,12 @@ internal fun AnimatedVisibilityScope.photoBranchRadius(
  * [fullScreenPhotoArea] (回收站/回忆时光机): the photo fills the ENTIRE screen (including under
  * the system bars) and the header/buttons float on top of it. [tapToToggleChrome] lets a single
  * tap on a photo hide/show the header and buttons, and [doubleTapToZoom] makes a double tap zoom
- * 1x↔3x (only zooms back out when already zoomed in).
- *
- * Opening: the header/buttons stay hidden while the overlay fades in (~300ms) and fade in
- * afterwards, so they never overlap the photo awkwardly.
- *
- * Closing first snaps any pinch-zoom back to 1x, then invokes [onClose] with the current photo
- * and whether the close came from a downward swipe:
- * - 下滑提交(拖过阈值): 照片从松手位置顺势下滑出屏,页面原样露出。
- * - 侧滑/系统返回/关闭按钮: 直接关闭(overlay 淡出)。
+ * 1x↔3x (only zooms back out when already zoomed in). [cellCornerRadius] is the grid cell's
+ * corner radius: the photo starts from it when opening and converges to 0 (full-screen).
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-fun SharedPhotoPreview(
+fun SharedTransitionScope.SharedPhotoPreview(
     photos: List<PhotoEntity>,
     initialIndex: Int,
     onClose: (PhotoEntity, viaSwipeDown: Boolean) -> Unit,
@@ -307,6 +308,8 @@ fun SharedPhotoPreview(
     tapToToggleChrome: Boolean = false,
     /** 双击照片在 1x ↔ 3x 间缩放；仅在已放大时允许缩小回 1x。 */
     doubleTapToZoom: Boolean = false,
+    /** 宫格 cell 的圆角：打开飞行从该圆角收敛到 0。 */
+    cellCornerRadius: Dp = 8.dp,
 ) {
     // Capture the list for this preview session: an in-preview restore/delete (which changes the
     // page's list) never yanks the pager out from under the exit animation. Re-key on the list
@@ -326,6 +329,31 @@ fun SharedPhotoPreview(
     val density = LocalDensity.current
     // 状态栏高度在进入预览时固定捕获：状态栏隐藏时 chrome/时间戳不会跳位。
     val statusBarTop = rememberStatusBarTop()
+    // Shared element: key = the CURRENT pager page's photo, so swiping pages only swaps the key
+    // (no new transition starts: with caller-managed visibility nothing re-runs while the
+    // visible flag stays true) and closing returns the photo actually on screen. During a
+    // swipe-out the modifier is removed entirely so the photo keeps sliding out via dragY
+    // instead of being yanked into a return flight.
+    val sharedState = rememberSharedContentState(photoSharedKey(currentPhoto.mediaId))
+    // 打开飞行期间圆角从 cell 半径收敛到 0；关闭飞行由 cell 自己的 clip 负责，预览侧不再渲染。
+    val flightVisible = active && !swipeOut
+    val cornerProgress by animateFloatAsState(
+        targetValue = if (flightVisible) 1f else 0f,
+        animationSpec = tween(PhotoTransitionMillis, easing = FastOutSlowInEasing),
+        label = "previewCorner",
+    )
+    val sharedModifier: Modifier =
+        if (swipeOut) {
+            Modifier
+        } else {
+            Modifier
+                .sharedElementWithCallerManagedVisibility(
+                    sharedState,
+                    visible = flightVisible,
+                    boundsTransform = PhotoBoundsTransform,
+                )
+                .clip(RoundedCornerShape(cellCornerRadius * (1f - cornerProgress)))
+        }
     val dismissThreshold = with(density) { 96.dp.toPx() }
     val effectiveDrag = dragY
     // The dark→bright reveal is deliberately SLOWER than the photo: the page behind reaches full
@@ -416,8 +444,10 @@ fun SharedPhotoPreview(
         )
         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = scrimAlpha)))
 
-        // ── 照片区域（全屏，无 shared element）──
+        // ── 照片区域（shared element）──
         // Layout-level offset (not graphicsLayer): the photo follows the drag with the layout.
+        // 转场期间（flightVisible）dragY 恒为 0，offset 不影响飞行；下滑提交后摘掉
+        // sharedElement，照片改由 offset 滑出屏幕。
         val dragOffset = Modifier.offset { IntOffset(0, dragY.roundToInt()) }
         val swipeDownModifier: Modifier =
             if (swipeDownToClose) {
@@ -486,6 +516,7 @@ fun SharedPhotoPreview(
                 } else {
                     ZoomablePhoto(
                         photo = p,
+                        enabled = !isTransitionActive,
                         resetTick = zoomResetTick,
                         onResetDone = { if (closePending) onClose(currentPhoto, swipeOut) },
                         placeholderRequest = placeholder,
@@ -530,8 +561,10 @@ fun SharedPhotoPreview(
             // ── 全屏照片分支（回收站 / 回忆时光机）──
             // 照片铺满整块屏幕（含状态栏/导航栏之下）；标题和按钮浮在照片上层，拖动退出时
             // 照片下滑、标题上滑、按钮下滑（不加渐变底，避免在照片上出现阴影）。
+            // sharedElement 在最外层：飞行期间它把动画尺寸约束交给子内容，子内容铺满。
             Box(
                 Modifier
+                    .then(sharedModifier)
                     .fillMaxSize()
                     .then(dragOffset)
                     .then(swipeDownModifier)
@@ -581,6 +614,7 @@ fun SharedPhotoPreview(
                 }
                 Box(
                     Modifier
+                        .then(sharedModifier)
                         .fillMaxWidth()
                         .weight(1f)
                         .then(dragOffset)

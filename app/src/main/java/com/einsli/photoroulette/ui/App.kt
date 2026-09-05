@@ -1,7 +1,6 @@
 package com.einsli.photoroulette.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.core.view.WindowCompat
 import androidx.compose.animation.*
@@ -507,6 +506,26 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
     }
 }
 
+/**
+ * 关闭预览前先让目标 cell 进入 viewport（若它在屏幕外）：返回飞行需要在转场首帧就能
+ * 找到与预览同 key 的 shared element，否则照片全屏停留、末了才跳进格子（滚动发生在
+ * 动画中途还会让目标格移动）。requestScrollToItem 同步生效，grid 未组合时也能调用。
+ */
+private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
+    val visible = state.layoutInfo.visibleItemsInfo
+    val first = visible.firstOrNull()?.index
+    val last = visible.lastOrNull()?.index
+    if (first == null || last == null || index < first || index > last) {
+        val scrollOffset = if (first != null && last != null && index > last) {
+            val cellHeight = visible.first().size.height
+            (state.layoutInfo.viewportSize.height - cellHeight).coerceAtLeast(0)
+        } else {
+            0
+        }
+        state.requestScrollToItem(index, scrollOffset)
+    }
+}
+
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable private fun RecycleBin(items: List<PhotoEntity>, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -515,6 +534,22 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
     var selected by remember { mutableStateOf(setOf<Long>()) }
     var previewIndex by remember { mutableIntStateOf(-1) }
     val previewOpen = previewIndex in items.indices
+    // 预览会话号：每次打开 +1。用它给预览内容做 key —— 关闭时 key 不变，预览内容在
+    // AnimatedVisibility 退出期间保持合成（shared element 才能连续飞回宫格）；再次打开时
+    // key 变化，预览以「本次点击的照片」为初始页全新合成。恢复/删除按钮 +1 则直接销毁
+    // 预览（不走飞行回位，照片即将从列表消失）。
+    var previewSession by remember { mutableIntStateOf(0) }
+    // 预览 overlay 的可见性比 previewOpen 晚一帧翻转（两段式打开）：每次打开都用
+    // previewSession 重 key 整个 SharedTransitionLayout（全新 scope，currentBounds 清零），
+    // 第一帧先让宫格 cell 在新 scope 里 measure（currentBounds 刷新到当前位置——否则滚动后
+    // 的 cell 会用首次合成位置起飞），第二帧再合成预览——此时 currentBounds 已就位，
+    // 预览的 owned transition 才能 false→true 跑起来触发飞行。
+    var previewVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(previewOpen) { previewVisible = previewOpen }
+    // 上一次打开/关闭的照片：只有它对应的 cell 在返回飞行期间渲染全屏 Fit 拷贝
+    // （fitOnEnter），并记录关闭时的目标 cell，避免所有 cell 订阅转场状态导致飞行
+    // 期间全量重组。
+    var closedMediaId by remember { mutableLongStateOf(-1L) }
     // Page-level back returns to Settings. While the preview is open, SharedPhotoPreview's own
     // BackHandler (composed later) wins and closes the preview first.
     BackHandler(onBack = onBack)
@@ -536,6 +571,10 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
     // 视口居中的固定窗口预载：只在滚动稳定停止后铺「可见区 ± 30 张」，快速甩动与滚动条
     // 拖拽经过的中间位置完全不进队列（详见 [GridWindowedThumbnailPreload]）。
     GridWindowedThumbnailPreload(gridState, items, gridThumbSize)
+    // 每次打开重 key 整个共享转场布局：全新 scope 让所有 shared element 的 currentBounds
+    // 清零，打开帧宫格 measure 时刷新到当前位置——否则「滚动后再点」的飞行会从 cell 首次
+    // 合成的位置起飞（见 previewVisible 的注释）。
+    key(previewSession) {
     PhotoSharedTransitionLayout {
         Box(Modifier.fillMaxSize().background(dc.pageBg)) {
             // ── 页面层：常驻组合（AnimatedVisibility(visible=true) 只提供 shared-element scope，
@@ -546,7 +585,6 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
                 enter = EnterTransition.None,
                 exit = ExitTransition.None,
             ) {
-                val radius = photoBranchRadius(gridCornerRadius = 8.dp, gridSide = true)
                 val statusBarTop = rememberStatusBarTop()
                 Column(
                     Modifier
@@ -633,13 +671,22 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
                                                 .pointerInput(photo.mediaId) {
                                                     detectTapGestures(
                                                         onTap = {
+                                                            previewSession++
+                                                            closedMediaId = photo.mediaId
                                                             previewIndex = index
                                                         },
                                                         onLongPress = { selected = if (liveChecked) selected - photo.mediaId else selected + photo.mediaId }
                                                     )
                                                 }
                                         ) {
-                                            SharedGridImage(photo, radius, this@AnimatedVisibility, Modifier.fillMaxSize(), gridSize = gridThumbSize)
+                                            SharedGridImage(
+                                                photo, 8.dp, Modifier.fillMaxSize(),
+                                                gridSize = gridThumbSize,
+                                                // 只有正在飞回的那张 cell 订阅转场状态并渲染全屏 Fit 拷贝。
+                                                fitOnEnter = photo.mediaId == closedMediaId,
+                                                // 预览打开期间 cell 退出「目标态」竞争：飞行目标只能有一个。
+                                                sharedVisible = !previewOpen,
+                                            )
                                             VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
                                             // 右下角选中圆圈：平时不显示；只要选中了任意一张，
                                             // 所有照片都显示圆圈（选中的实心、未选的空心），点圆圈
@@ -670,13 +717,17 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
             // ── 预览层：overlay（AnimatedVisibility 单一常驻实例，不随开关销毁重建——
             //    快速「关闭再点开」只是 visible 翻转，shared-element state 不会反复
             //    add/remove，避免飞行卡死在源 bounds / isTransitionActive 悬挂的卡死）──
+            // visible 用 previewVisible（比 previewOpen 晚一帧）：让新 scope 的宫格先
+            // measure 刷新 currentBounds，预览合成时飞行才能从正确的 cell 起飞。
+            // 关闭时 previewSession 不变，预览内容在退出期间保持合成，shared element
+            // 才能连续飞回宫格。
             AnimatedVisibility(
-                visible = previewOpen,
+                visible = previewVisible,
                 enter = fadeIn(tween(PhotoTransitionMillis)),
                 exit = fadeOut(tween(PhotoTransitionMillis)),
                 label = "trashPreview",
             ) {
-                if (previewIndex in items.indices) {
+                if (previewSession > 0) {
                     SharedPhotoPreview(
                         photos = items,
                         initialIndex = previewIndex,
@@ -685,20 +736,34 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
                         fullScreenPhotoArea = true,
                         tapToToggleChrome = true,
                         doubleTapToZoom = true,
+                        cellCornerRadius = 8.dp,
                         active = previewOpen,
-                        onClose = { _, _ ->
+                        onClose = { current, viaSwipeDown ->
                             scope.launch {
-                                // 无 shared element 飞行：任何关闭路径都只是关掉 overlay。
+                                // 正常关闭（侧滑/系统返回/关闭按钮）：先记录目标照片并让它的
+                                // cell 进入 viewport（若在屏幕外），返回飞行才能从全屏连续缩回
+                                // 正确的宫格位置；下滑划走式关闭照片已滑出屏幕，直接关 overlay。
+                                if (!viaSwipeDown) {
+                                    closedMediaId = current.mediaId
+                                    val idx = items.indexOfFirst { it.mediaId == current.mediaId }
+                                    if (idx >= 0) revealGridItemIfOffscreen(gridState, idx)
+                                }
                                 previewIndex = -1
                             }
                         },
                         bottomControls = { current ->
                             Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                // 恢复/删除：照片即将从列表消失，不飞行回位——bump 会话号
+                                // 直接销毁预览（照片会从网格消失，飞回去反而突兀）。
                                 Button(onClick = {
+                                    previewVisible = false
+                                    previewSession++
                                     previewIndex = -1
                                     onRestore(listOf(current.mediaId))
                                 }, Modifier.weight(1f)) { Text("移出回收站") }
                                 Button(onClick = {
+                                    previewVisible = false
+                                    previewSession++
                                     previewIndex = -1
                                     scope.launch { viewModel.deleteFromTrash(listOf(current.mediaId)) }
                                 }, Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("永久删除") }
@@ -708,6 +773,7 @@ private fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<
                 }
             }
         }
+    }
     }
 }
 
@@ -1511,6 +1577,14 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     val photos = memory?.photos ?: emptyList()
     var previewIndex by remember { mutableIntStateOf(-1) }
     val previewOpen = previewIndex in photos.indices
+    // 预览会话号（同回收站）：每次打开重 key 整个共享转场布局（新 scope 刷新
+    // currentBounds）；关闭时 key 不变，预览在退出期间保持合成让照片飞回宫格。
+    var previewSession by remember { mutableIntStateOf(0) }
+    // 两段式打开（同回收站）：overlay 比 previewOpen 晚一帧显示，让宫格先 measure。
+    var previewVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(previewOpen) { previewVisible = previewOpen }
+    // 上一次打开/关闭的照片：只有它对应的 cell 在返回飞行期间渲染全屏 Fit 拷贝（同回收站）。
+    var closedMediaId by remember { mutableLongStateOf(-1L) }
     // Cell-sized decode target for the 3-column memory grid (same trick as RecycleBin).
     val gridCellPx = with(LocalDensity.current) {
         (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
@@ -1527,6 +1601,9 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     val gridState = rememberLazyGridState()
     // 视口居中的固定窗口预载（同回收站）：甩动/滚动条拖拽经过的中间位置不进队列。
     GridWindowedThumbnailPreload(gridState, photos, gridThumbSize)
+    // 每次打开重 key 整个共享转场布局：新 scope 让所有 shared element 的 currentBounds
+    // 清零，打开帧宫格 measure 时刷新到当前位置（同回收站）。
+    key(previewSession) {
     PhotoSharedTransitionLayout {
         Box(Modifier.fillMaxSize().background(dc.pageBg)) {
             // ── 页面层：常驻组合（同回收站：AnimatedVisibility(visible=true) 只提供 scope）──
@@ -1535,7 +1612,6 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                 enter = EnterTransition.None,
                 exit = ExitTransition.None,
             ) {
-                val radius = photoBranchRadius(gridCornerRadius = 12.dp, gridSide = true)
                 val statusBarTop = rememberStatusBarTop()
                 Column(
                     Modifier
@@ -1593,10 +1669,17 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                                 .clip(RoundedCornerShape(12.dp))
                                                 .background(dc.white)
                                                 .clickable {
+                                                    previewSession++
+                                                    closedMediaId = photo.mediaId
                                                     previewIndex = index
                                                 }
                                         ) {
-                                            SharedGridImage(photo, radius, this@AnimatedVisibility, Modifier.fillMaxSize(), gridSize = gridThumbSize)
+                                            SharedGridImage(
+                                                photo, 12.dp, Modifier.fillMaxSize(),
+                                                gridSize = gridThumbSize,
+                                                fitOnEnter = photo.mediaId == closedMediaId,
+                                                sharedVisible = !previewOpen,
+                                            )
                                             VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
                                         }
                                     }
@@ -1605,15 +1688,16 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                         }
                     }
             }
-            // ── 预览层：overlay（同回收站：AnimatedVisibility 单一常驻实例，不随开关销毁重建，
-            //    快速「关闭再点开」只是 visible 翻转，shared-element state 不反复增删）──
+            // ── 预览层：overlay（同回收站：AnimatedVisibility 单一常驻实例；visible 用
+            //    previewVisible 晚一帧显示让宫格先 measure；关闭时 previewSession 不变，
+            //    预览在退出期间保持合成让 shared element 飞回）──
             AnimatedVisibility(
-                visible = previewOpen,
+                visible = previewVisible,
                 enter = fadeIn(tween(PhotoTransitionMillis)),
                 exit = fadeOut(tween(PhotoTransitionMillis)),
                 label = "memoryPreview",
             ) {
-                if (previewIndex in photos.indices) {
+                if (previewSession > 0) {
                     SharedPhotoPreview(
                         photos = photos,
                         initialIndex = previewIndex,
@@ -1622,10 +1706,17 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                         fullScreenPhotoArea = true,
                         tapToToggleChrome = true,
                         doubleTapToZoom = true,
+                        cellCornerRadius = 12.dp,
                         active = previewOpen,
-                        onClose = { _, _ ->
+                        onClose = { current, viaSwipeDown ->
                             scope.launch {
-                                // 无 shared element 飞行：任何关闭路径都只是关掉 overlay。
+                                // 正常关闭先让目标 cell 进入 viewport（若在屏幕外），返回飞行
+                                // 才能从全屏连续缩回正确的宫格位置；下滑划走式直接关 overlay。
+                                if (!viaSwipeDown) {
+                                    closedMediaId = current.mediaId
+                                    val idx = photos.indexOfFirst { it.mediaId == current.mediaId }
+                                    if (idx >= 0) revealGridItemIfOffscreen(gridState, idx)
+                                }
                                 previewIndex = -1
                             }
                         },
@@ -1633,5 +1724,6 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                 }
             }
         }
+    }
     }
 }
