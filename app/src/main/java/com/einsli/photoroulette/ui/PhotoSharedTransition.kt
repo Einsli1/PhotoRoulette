@@ -96,7 +96,7 @@ object PhotoAspectCache {
 internal fun cropToFitRatio(aspect: Float): Float = maxOf(aspect, 1f / aspect)
 
 /** Duration and easing shared by the bounds animation and the corner-radius animation. */
-internal const val PhotoTransitionMillis = 300
+internal const val PhotoTransitionMillis = 250   // 第 99 行，一处生效
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 internal val PhotoBoundsTransform: BoundsTransform = BoundsTransform { _, _ ->
@@ -204,6 +204,8 @@ fun SharedTransitionScope.SharedGridImage(
     val morph = remember { Animatable(0f) }
     LaunchedEffect(flightActive) {
         if (flightActive) {
+            // 返回方向必须与边框同速(300ms):内容「回裁」是放大,若比边框缩小快,返回一开始
+            // 会先快速放大裁回一下再缩小,读作一次「跳跃」。
             morph.animateTo(1f, tween(PhotoTransitionMillis, easing = FastOutSlowInEasing))
         } else {
             morph.snapTo(0f)
@@ -378,7 +380,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
     LaunchedEffect(active) {
         if (active) {
             contentMorph.snapTo(0f)
-            contentMorph.animateTo(1f, tween(PhotoTransitionMillis, easing = FastOutSlowInEasing))
+            contentMorph.animateTo(1f, tween(220, easing = FastOutSlowInEasing))
         } else {
             contentMorph.snapTo(1f)
         }
