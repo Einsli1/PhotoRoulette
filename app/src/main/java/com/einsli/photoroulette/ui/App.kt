@@ -89,10 +89,13 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -132,19 +135,39 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
     val trashItems by viewModel.trashItems.collectAsStateWithLifecycle(emptyList())
     var page by rememberSaveable { mutableIntStateOf(if (openReviewRequest > 0) 2 else 0) }
     // ── 底部 Tab 左右滑动切换(微信式)。page 是唯一状态源,pager 只有两条方向相反的
-    //    写入通路,各自的 guard 吸收反向写入,不形成回环、不叠加第二套动画:
+    //    写入通路,不形成回环、不叠加第二套动画:
     //    1) 滑动:pager.currentPage 越过中线那一帧 → page = 目标 Tab(底部栏选中态随动);
-    //    2) 点击 Tab:navigate() 往 tabClicks 投递目标索引,独立长循环里 animateScrollToPage。
+    //    2) 点击 Tab:navigate() 无条件往 tabClicks 投递目标索引,独立长循环用收敛循环
+    //       (while currentPage != idx + 打断重试)把 pager 驱动到目标页。
     //    点击动画绝不能放在 LaunchedEffect(page) 里:跨越中间 Tab 的动画途中,通路 1 改写
     //    page 会重启该效果、取消进行中的动画协程 —— pager 冻结在两页之间(首页⇄设置点切换
-    //    必卡死在中间,即此坑)。channel 串行排队:动画中的再点击接续执行,永不半途取消。
+    //    必卡死在中间,即坑 26)。channel 串行排队:动画中的再点击接续执行,永不半途取消。
     val pagerState = rememberPagerState(initialPage = tabPages.indexOf(page).coerceAtLeast(0)) { tabPages.size }
     val tabClicks = remember { Channel<Int>(Channel.CONFLATED) }
+    // 收敛循环:不能「单发一次 animateScrollToPage 完事」。它跑在 MutatePriority.Default,
+    // 会被更高优先级的滚动打断,且两种打断都会把 CancellationException 直接抛进本协程——
+    // (a) 动画进行中手指按下 pager(UserInput 打断 Default);(b) 手势的惯性/吸附(fling
+    // 属同一次 UserInput 滚动)还在跑时点了 Tab,MutatorMutex 发现新调用优先级更低,对调用
+    // 方抛异常。没有 catch 时整个消费循环被杀死:之后 navigate 照常写 page(图标切换)、
+    // trySend 到 CONFLATED 通道照常成功,但再也没人执行动画 —— 「图标切了、页面不切」且
+    // 本次会话内永不自愈(2026-09-06 报障的根因)。所以必须 catch 住、等手势(含惯性/吸附)
+    // 彻底结束再重试,直到 currentPage 真正落到目标页;catch 里 ensureActive:组合销毁导致
+    // 的真取消(本协程 Job 被取消)照常传播,不能吞。
+    // 守卫不读 targetPage:PagerState.scroll 对 programmaticScrollTargetPage 的重置没有
+    // try/finally,动画被打断后该值滞留,isScrollInProgress 期间 targetPage 会返回旧目标,
+    // 拿它做守卫会漏掉本该执行的动画。只认 currentPage —— 已停到目标页时 while 不执行,
+    // 不会叠加第二套动画。
     LaunchedEffect(pagerState) {
         for (idx in tabClicks) {
             if (idx < 0) continue // 沉浸页期间 pager 保持原位:总是从当前 Tab 打开,返回露出的就是它
-            if (pagerState.targetPage == idx || pagerState.currentPage == idx) continue
-            pagerState.animateScrollToPage(idx)
+            while (pagerState.currentPage != idx) {
+                try {
+                    pagerState.animateScrollToPage(idx)
+                } catch (e: CancellationException) {
+                    ensureActive()
+                    snapshotFlow { pagerState.isScrollInProgress }.first { !it }
+                }
+            }
         }
     }
     LaunchedEffect(pagerState) {
@@ -189,8 +212,12 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
         if (page == 1) savedSettingsScroll = settingsScroll.value
         if (page != newPage) {
             page = newPage
-            tabClicks.trySend(tabPages.indexOf(newPage))
         }
+        // 无条件投递(不管 page 是否已等于 newPage):page 可能早就被 snapshotFlow 的
+        // currentPage 翻页写成了目标值,而 pager 还在别处/还在路上(手势惯性、被打断的旧
+        // 动画)——此时跳过投递,这次点击就只切了图标、pager 永远不会跟过去。消费端对
+        // 「已停在目标页」的投递是无操作(while 条件不成立),重复投递无副作用。
+        tabClicks.trySend(tabPages.indexOf(newPage))
     }
     PhotoRouletteTheme(dark = isDark, dynamicColor = useDynamic) {
         val dc = designColors()
