@@ -354,6 +354,10 @@ fun SharedTransitionScope.SharedPhotoPreview(
     doubleTapToZoom: Boolean = false,
     /** 宫格 cell 的圆角：打开飞行从该圆角收敛到 0。 */
     cellCornerRadius: Dp = 8.dp,
+    /** 回收站样式自定义头部插槽：非空时替换默认头部（关闭按钮/文件名/页码）。
+     *  参数 = 当前照片 + requestClose（触发与默认关闭按钮完全相同的关闭流程）。
+     *  回忆时光机不传，预览外观一个字节都不变。 */
+    customHeader: (@Composable (current: PhotoEntity, requestClose: () -> Unit) -> Unit)? = null,
 ) {
     // Capture the list for this preview session: an in-preview restore/delete (which changes the
     // page's list) never yanks the pager out from under the exit animation. Re-key on the list
@@ -619,33 +623,37 @@ fun SharedTransitionScope.SharedPhotoPreview(
             }
         }
 
-        // ── 标题区（关闭 / 文件名 / 页码）──
+        // ── 标题区：调用方插槽（回收站的「日期+时间」样式）或默认（关闭 / 文件名 / 页码）──
         val headerRow: @Composable () -> Unit = {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = { requestClose() }) {
-                    Icon(Icons.Default.Close, "关闭", tint = Color.White)
+            if (customHeader != null) {
+                customHeader(currentPhoto) { requestClose() }
+            } else {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { requestClose() }) {
+                        Icon(Icons.Default.Close, "关闭", tint = Color.White)
+                    }
+                    Text(
+                        currentPhoto.displayName,
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                    )
+                    Text(
+                        "${pagerState.currentPage + 1}/${openPhotos.size}",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
                 }
-                Text(
-                    currentPhoto.displayName,
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-                )
-                Text(
-                    "${pagerState.currentPage + 1}/${openPhotos.size}",
-                    color = Color.White.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(end = 8.dp),
-                )
             }
         }
 

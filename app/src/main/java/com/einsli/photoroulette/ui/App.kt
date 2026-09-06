@@ -31,7 +31,9 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -62,13 +64,18 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Delete
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.imageLoader
 import coil.request.ImageRequest
@@ -399,7 +406,7 @@ private fun PageContent(
             onNavigate(2)
         }, onScan = onScan, onOpenMemory = { onNavigate(5) })
         1 -> Settings(state.settings, viewModel, scrollState = settingsScroll, savedScroll = savedSettingsScroll, openTrash = { onNavigate(3) })
-        3 -> RecycleBin(trashItems, viewModel, onRestore = onRestoreFromTrash, onBack = { onNavigate(1) })
+        3 -> RecycleBin(trashItems, state.stats.trashBytes, viewModel, onRestore = onRestoreFromTrash, onBack = { onNavigate(1) })
         4 -> {
             // 历史整理:按周显示和切换,选中历史日期即查看它所在的一周。
             val historyWeek by viewModel.historyWeek.collectAsStateWithLifecycle()
@@ -444,8 +451,10 @@ private fun PageContent(
     }, dismissButton = { TextButton(onClick = onClose) { Text("取消") } })
 }
 
-/** 回收站宫格右下角的选中标识：未选中=空心圆圈（深色细描边 + 白色圆环，任何照片上都看得清），
- *  已选中=实心圆 + 对勾。选中状态只体现在这个圆圈上，照片本身保持原色。 */
+/** 回收站选择模式（设计图：回收站选择.jpg）的选中标识：未选中=半透明白描边空心圈，
+ *  已选中=实心蓝底 + 白色对勾（设计图用 MIUI 蓝）。 */
+private val TrashSelectionBlue = Color(0xFF3478F6)
+
 @Composable
 private fun TrashSelectionBadge(checked: Boolean, modifier: Modifier = Modifier) {
     Box(
@@ -457,14 +466,11 @@ private fun TrashSelectionBadge(checked: Boolean, modifier: Modifier = Modifier)
                     Modifier
                         .size(22.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                        .border(1.dp, Color.White.copy(alpha = 0.9f), CircleShape)
+                        .background(TrashSelectionBlue)
                 } else {
                     Modifier
                         .size(22.dp)
-                        .border(1.dp, Color.Black.copy(alpha = 0.3f), CircleShape)
-                        .padding(1.5.dp)
-                        .border(1.5.dp, Color.White, CircleShape)
+                        .border(1.5.dp, Color.White.copy(alpha = 0.8f), CircleShape)
                 }
             ),
         contentAlignment = Alignment.Center,
@@ -473,12 +479,101 @@ private fun TrashSelectionBadge(checked: Boolean, modifier: Modifier = Modifier)
             Icon(
                 Icons.Default.Check,
                 contentDescription = "已选中",
-                tint = MaterialTheme.colorScheme.onPrimary,
+                tint = Color.White,
                 modifier = Modifier.size(14.dp),
             )
         }
     }
 }
+
+/** 4 列密铺宫格的视频角标（设计图：左下角小播放三角 + 时长，白字，无底色）。
+ *  视频格才渲染；必须放在 shared element 的兄弟层，不随转场缩放。 */
+@Composable
+private fun GridVideoBadge(photo: PhotoEntity, modifier: Modifier = Modifier) {
+    if (!photo.mimeType.startsWith("video/")) return
+    Box(modifier) {
+        Row(
+            Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 6.dp, bottom = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.PlayArrow,
+                contentDescription = "视频",
+                tint = Color.White,
+                modifier = Modifier.size(16.dp),
+            )
+            if (photo.duration > 0) {
+                Text(
+                    formatDuration(photo.duration),
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(start = 1.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 设计图同款深色胶囊动作条（半透明黑、大圆角）：图标在上、文字在下。
+ *  回收站选择模式的底部悬浮条与回收站预览的底部动作共用。 */
+@Composable
+private fun TrashActionPill(
+    restoreEnabled: Boolean,
+    deleteEnabled: Boolean,
+    onRestore: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier
+            .clip(RoundedCornerShape(28.dp))
+            .background(Color.Black.copy(alpha = 0.75f))
+            .padding(horizontal = 36.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(44.dp),
+    ) {
+        TrashPillAction(Icons.AutoMirrored.Filled.Redo, "恢复", restoreEnabled, onRestore)
+        TrashPillAction(Icons.Outlined.Delete, "删除", deleteEnabled, onDelete)
+    }
+}
+
+@Composable
+private fun TrashPillAction(icon: ImageVector, label: String, enabled: Boolean, onClick: () -> Unit) {
+    val alpha = if (enabled) 1f else 0.4f
+    Column(
+        Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(icon, label, tint = Color.White.copy(alpha = alpha), modifier = Modifier.size(22.dp))
+        Spacer(Modifier.height(2.dp))
+        Text(label, color = Color.White.copy(alpha = alpha), fontSize = 12.sp)
+    }
+}
+
+/** 与 Home.kt/StatsScreen.kt 同规则的容量格式化（4.69GB 样式），回收站副标题用。 */
+private fun formatBytes(b: Long): String {
+    val gb = b / 1_073_741_824.0
+    val mb = b / 1_048_576.0
+    val kb = b / 1024.0
+    return when {
+        gb >= 1 -> String.format("%.1fGB", gb)
+        mb >= 1 -> String.format("%.0fMB", mb)
+        kb >= 1 -> String.format("%.0fKB", kb)
+        else -> "0B"
+    }
+}
+
+/** 回收站预览头部的日期（2022年1月27日）/ 时间（23:51）两行，取 dateTaken。 */
+private fun formatTrashDate(taken: Long): String =
+    if (taken <= 0L) "" else SimpleDateFormat("yyyy年M月d日", Locale.getDefault()).format(Date(taken))
+
+private fun formatTrashTime(taken: Long): String =
+    if (taken <= 0L) "" else SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(taken))
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 // ── 宫格缩略图预载（回收站 / 回忆时光机共用）───────────────────────────────────────
@@ -569,11 +664,13 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
 }
 
 @OptIn(ExperimentalSharedTransitionApi::class)
-@Composable private fun RecycleBin(items: List<PhotoEntity>, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
+@Composable private fun RecycleBin(items: List<PhotoEntity>, trashBytes: Long, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
-    // 根节点必须铺不透明 pageBg:Tab 层(pager)常驻垫底,透明根会透出下面的设置页。
-    val dc = designColors()
     var selected by remember { mutableStateOf(setOf<Long>()) }
+    // 选择模式：右上垃圾桶按钮或长按照片进入，X 退出。只要有选中项也视为选择中
+    // （沿用旧的「有选中即显示圆圈」行为）。
+    var selectMode by remember { mutableStateOf(false) }
+    val selecting = selectMode || selected.isNotEmpty()
     var previewIndex by remember { mutableIntStateOf(-1) }
     val previewOpen = previewIndex in items.indices
     // 预览会话号：每次打开 +1。用它给预览内容做 key —— 关闭时 key 不变，预览内容在
@@ -607,21 +704,34 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     // Page-level back returns to Settings. While the preview is open, SharedPhotoPreview's own
     // BackHandler (composed later) wins and closes the preview first.
     BackHandler(onBack = onBack)
+    // 选择模式下系统返回先退出选择（预览打开时预览自己的 BackHandler 在更后面组合、优先生效）。
+    BackHandler(enabled = selecting && !previewOpen) {
+        selectMode = false
+        selected = emptySet()
+    }
     val gridState = rememberLazyGridState()
-    // Cell-sized decode target for grid thumbnails: 3 columns, so ~screenWidth/3 px. Fixing the
+    // 页面是设计图的 MIUI 黑底：状态栏图标强制白色（无论 App 主题），离开页面恢复。
+    val trashActivity = LocalContext.current as? android.app.Activity
+    DisposableEffect(trashActivity) {
+        val window = trashActivity?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        val previous = controller?.isAppearanceLightStatusBars
+        controller?.isAppearanceLightStatusBars = false
+        onDispose { previous?.let { prev -> controller?.isAppearanceLightStatusBars = prev } }
+    }
+    // Cell-sized decode target for grid thumbnails: 4 columns, so ~screenWidth/4 px. Fixing the
     // request size keeps every cell's memory-cache entry identical and small, so fast scrolling
     // re-shows already-loaded photos instantly instead of re-decoding.
     val gridCellPx = with(LocalDensity.current) {
-        (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
+        (LocalConfiguration.current.screenWidthDp.dp.toPx() / 4f).roundToInt()
     }
-    // 缩略图解码尺寸 = 显示像素的 70%（400→280px）：解码快 ~2 倍、单张内存省一半，
+    // 缩略图解码尺寸 = 显示像素的 70%：解码快 ~2 倍、单张内存省一半，
     // 配合扩容后的内存缓存（见 PhotoRouletteApp），窗口内载过的缩略图滑回来直接命中。
     val thumbPx = remember(gridCellPx) { (gridCellPx * 0.7f).roundToInt() }
     val gridThumbSize = remember(thumbPx) { CoilSize(thumbPx, thumbPx) }
-    // One grid row = cell + vertical spacing (8dp); approximates the scroll offset from the
+    // One grid row = cell（4 列密铺零间距，无额外行距）; approximates the scroll offset from the
     // first visible item's index, used by the spring pull's limit detection.
-    val localDensity = LocalDensity.current
-    val gridRowPx = remember(gridCellPx) { gridCellPx + with(localDensity) { 8.dp.toPx() }.roundToInt() }
+    val gridRowPx = gridCellPx
     // 视口居中的固定窗口预载：只在滚动稳定停止后铺「可见区 ± 30 张」，快速甩动与滚动条
     // 拖拽经过的中间位置完全不进队列（详见 [GridWindowedThumbnailPreload]）。
     GridWindowedThumbnailPreload(gridState, items, gridThumbSize)
@@ -636,7 +746,8 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
         LaunchedEffect(previewOpen, previewVisible, isTransitionActive, closing) {
             previewSettled = previewOpen && previewVisible && !isTransitionActive && !closing
         }
-        Box(Modifier.fillMaxSize().background(dc.pageBg)) {
+        // 回收站页面 = 设计图的 MIUI 纯黑底（设计图：回收站顶部.jpg）。
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
             // ── 页面层：常驻组合（AnimatedVisibility(visible=true) 只提供 shared-element scope，
             //    永不进出组合）── 预览开关不再重组合页面：下滑返回时缩略图/滚动原位保留，
             //    没有「重新组合灰格 + 交叉淡化」的整页闪烁。
@@ -646,72 +757,41 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                 exit = ExitTransition.None,
             ) {
                 val statusBarTop = rememberStatusBarTop()
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .padding(top = statusBarTop)
-                        .navigationBarsPadding()
-                        .padding(12.dp)
-                ) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("回收站", style = MaterialTheme.typography.headlineMedium)
-                            // 选中数量提示：显示在标题与返回按钮之间，无选中时不占位
-                            if (selected.isNotEmpty()) {
-                                Text(
-                                    "已选 ${selected.size}",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            Button(onBack) { Text("返回") }
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            val allIds = items.map { it.mediaId }.toSet()
-                            Button(onClick = { selected = if (selected.size != allIds.size) allIds else emptySet() }) { Text(if (selected.size != allIds.size) "全选" else "取消全选") }
-                            Button(enabled = selected.isNotEmpty(), onClick = {
-                                val ids = selected.toList()
-                                selected = emptySet()
-                                onRestore(ids)
-                            }) { Text("移出回收站") }
-                            Button(enabled = selected.isNotEmpty(), onClick = {
-                                val ids = selected.toList()
-                                selected = emptySet()
-                                scope.launch { viewModel.deleteFromTrash(ids) }
-                            }) { Text("批量删除") }
-                        }
-                        Spacer(Modifier.height(4.dp))
-                        Text("长按选中，点击圆圈多选，点击照片预览", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(8.dp))
-                        // Only the grid area is elastic: the header and buttons stay fixed, so the
-                        // pull (drag past the edge or the fling-limit spring) moves just the photos.
-                        // clipToBounds keeps the sliding grid from covering the header above it
-                        // (the pull is a translation, so without clipping it overlaps upward).
-                        SpringPullBox(
-                            modifier = Modifier.weight(1f).fillMaxWidth().clipToBounds(),
-                            pullAtTop = { (gridState.firstVisibleItemIndex * gridRowPx + gridState.firstVisibleItemScrollOffset).toFloat().coerceAtLeast(0f) },
-                            pullAtBottom = {
-                                val info = gridState.layoutInfo
-                                val last = info.visibleItemsInfo.lastOrNull()
-                                if (last == null || last.index < info.totalItemsCount - 1) {
-                                    // More content below the viewport: still scrollable, no bottom pull.
-                                    Float.MAX_VALUE
-                                } else {
-                                    val contentEnd = (last.offset.y + last.size.height + info.afterContentPadding).toFloat()
-                                    (contentEnd - info.viewportEndOffset.toFloat()).coerceAtLeast(0f)
-                                }
-                            },
-                        ) {
-                            if (items.isEmpty()) {
-                                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("回收站为空") }
+                // 设计图（回收站顶部/中间.jpg）：黑底、4 列密铺宫格顶到状态栏，头部悬浮在
+                // 宫格上层并带顶部黑色渐变——滚动时照片从头部下面穿过、头部内容透出来。
+                Box(Modifier.fillMaxSize()) {
+                    val gridTopPad = statusBarTop + 56.dp
+                    val gridBottomPad = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 96.dp
+                    // 整页弹性（宫格铺满整屏，头部是 overlay 不占布局），pull 语义与原来一致。
+                    // clipToBounds 让弹出的宫格只在页面边界内移动。
+                    SpringPullBox(
+                        modifier = Modifier.fillMaxSize().clipToBounds(),
+                        pullAtTop = { (gridState.firstVisibleItemIndex * gridRowPx + gridState.firstVisibleItemScrollOffset).toFloat().coerceAtLeast(0f) },
+                        pullAtBottom = {
+                            val info = gridState.layoutInfo
+                            val last = info.visibleItemsInfo.lastOrNull()
+                            if (last == null || last.index < info.totalItemsCount - 1) {
+                                // More content below the viewport: still scrollable, no bottom pull.
+                                Float.MAX_VALUE
                             } else {
-                                Box(Modifier.fillMaxSize()) {
+                                val contentEnd = (last.offset.y + last.size.height + info.afterContentPadding).toFloat()
+                                (contentEnd - info.viewportEndOffset.toFloat()).coerceAtLeast(0f)
+                            }
+                        },
+                    ) {
+                        if (items.isEmpty()) {
+                            Column(
+                                Modifier.fillMaxSize().navigationBarsPadding(),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center,
+                            ) { Text("回收站为空", color = Color.White.copy(alpha = 0.6f)) }
+                        } else {
+                            Box(Modifier.fillMaxSize()) {
                                 LazyVerticalGrid(
                                     state = gridState,
-                                    columns = GridCells.Fixed(3),
+                                    columns = GridCells.Fixed(4),
                                     modifier = Modifier.fillMaxSize(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    contentPadding = PaddingValues(top = gridTopPad, bottom = gridBottomPad),
                                     flingBehavior = rememberGentleFlingBehavior()
                                 ) {
                                     itemsIndexed(
@@ -727,7 +807,6 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                         Box(
                                             Modifier
                                                 .aspectRatio(1f)
-                                                .clip(RoundedCornerShape(8.dp))
                                                 .pointerInput(photo.mediaId) {
                                                     detectTapGestures(
                                                         onTap = {
@@ -756,19 +835,19 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                                 else -> photoSharedKey(photo.mediaId)
                                             }
                                             SharedGridImage(
-                                                photo, 8.dp, Modifier.fillMaxSize(),
+                                                photo, 0.dp, Modifier.fillMaxSize(),
                                                 gridSize = gridThumbSize,
-                                                sharedKey = cellSharedKey,
                                                 // 只有正在飞回的那张 cell 订阅转场状态并渲染全屏 Fit 拷贝。
                                                 fitOnEnter = photo.mediaId == flyingMediaId,
                                                 // 预览打开期间 cell 退出「目标态」竞争：飞行目标只能有一个。
                                                 sharedVisible = !previewOpen,
                                             )
-                                            VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
-                                            // 右下角选中圆圈：平时不显示；只要选中了任意一张，
-                                            // 所有照片都显示圆圈（选中的实心、未选的空心），点圆圈
-                                            // 切换选中（不触发预览），照片本身不变色。
-                                            if (selected.isNotEmpty()) {
+                                            // 设计图视频角标：左下角小播放三角 + 时长（无居中大播放钮）。
+                                            GridVideoBadge(photo, Modifier.fillMaxSize())
+                                            // 右下角圆形选择圈：选择模式下所有格子都显示（未选=半透明
+                                            // 白描边空心圈、已选=实心蓝勾），点圆圈切换选中（不触发
+                                            // 预览），照片本身不变色。
+                                            if (selecting) {
                                                 Box(
                                                     Modifier
                                                         .align(Alignment.BottomEnd)
@@ -786,10 +865,91 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                     }
                                 }
                                 TrashScrollbar(gridState, items.size, Modifier.align(Alignment.CenterEnd))
+                            }
+                        }
+                    }
+                    // ── 悬浮头部：普通模式 = 返回‹ + 「回收站/总容量」 + 垃圾桶(进选择模式)；
+                    //    选择模式 = X(退出) + 「已选择N项」 + 全选。渐变底让白字在任何照片上可读，
+                    //    且吸收落在头部空白处的触碰（不误开下面的照片）。
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.verticalGradient(
+                                    0f to Color.Black.copy(alpha = 0.8f),
+                                    1f to Color.Transparent,
+                                )
+                            )
+                            .padding(bottom = 24.dp)
+                            .pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) { awaitPointerEvent().changes.forEach { it.consume() } }
+                                }
+                            },
+                    ) {
+                        Column(Modifier.padding(top = statusBarTop)) {
+                            if (selecting) {
+                                Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = { selectMode = false; selected = emptySet() }) {
+                                        Icon(Icons.Default.Close, "退出选择", tint = Color.White)
+                                    }
+                                    Text(
+                                        "已选择${selected.size}项",
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 17.sp,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    // 设计图此处是排序图标；无排序功能，映射为全选（设计映射）。
+                                    IconButton(onClick = {
+                                        val allIds = items.map { it.mediaId }.toSet()
+                                        selected = if (selected == allIds) emptySet() else allIds
+                                    }) { Icon(Icons.Default.DoneAll, "全选", tint = Color.White) }
+                                }
+                            } else {
+                                Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = onBack) {
+                                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "返回", tint = Color.White, modifier = Modifier.size(30.dp))
+                                    }
+                                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text("回收站", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                                        Text(formatBytes(trashBytes), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                                    }
+                                    IconButton(onClick = { selectMode = true }) {
+                                        Icon(Icons.Outlined.Delete, "选择照片", tint = Color.White)
+                                    }
                                 }
                             }
                         }
                     }
+                    // ── 选择模式的底部居中悬浮深色胶囊：恢复 / 删除（图标上、文字下）。
+                    if (selecting) {
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .navigationBarsPadding()
+                                .padding(bottom = 20.dp),
+                        ) {
+                            TrashActionPill(
+                                restoreEnabled = selected.isNotEmpty(),
+                                deleteEnabled = selected.isNotEmpty(),
+                                onRestore = {
+                                    val ids = selected.toList()
+                                    selected = emptySet()
+                                    selectMode = false
+                                    onRestore(ids)
+                                },
+                                onDelete = {
+                                    val ids = selected.toList()
+                                    selected = emptySet()
+                                    selectMode = false
+                                    scope.launch { viewModel.deleteFromTrash(ids) }
+                                },
+                            )
+                        }
+                    }
+                }
             }
             // ── 预览层：overlay（AnimatedVisibility 单一常驻实例，不随开关销毁重建——
             //    快速「关闭再点开」只是 visible 翻转，shared-element state 不会反复
@@ -813,7 +973,29 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                         fullScreenPhotoArea = true,
                         tapToToggleChrome = true,
                         doubleTapToZoom = true,
-                        cellCornerRadius = 8.dp,
+                        cellCornerRadius = 0.dp,
+                        // 设计图（照片/视频预览页.jpg）：头部 = 返回‹ + 日期粗体 + 时间小字，
+                        // 取 dateTaken；替换默认头部（关闭/文件名/页码）。回忆时光机不传不受影响。
+                        customHeader = { current, requestClose ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 4.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                IconButton(onClick = { requestClose() }) {
+                                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "返回", tint = Color.White, modifier = Modifier.size(30.dp))
+                                }
+                                if (formatTrashDate(current.dateTaken).isEmpty()) {
+                                    Text(current.displayName, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                } else {
+                                    Column(Modifier.padding(start = 4.dp)) {
+                                        Text(formatTrashDate(current.dateTaken), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                        Text(formatTrashTime(current.dateTaken), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        },
                         active = previewOpen,
                         onCloseStarted = { currentMediaId ->
                             // 关闭流程启动(缩放回位之前):记住要起飞的当前照片,并把 cell 的
@@ -836,21 +1018,26 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                             }
                         },
                         bottomControls = { current ->
-                            Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                // 恢复/删除：照片即将从列表消失，不飞行回位——bump 会话号
-                                // 直接销毁预览（照片会从网格消失，飞回去反而突兀）。
-                                Button(onClick = {
-                                    previewVisible = false
-                                    previewSession++
-                                    previewIndex = -1
-                                    onRestore(listOf(current.mediaId))
-                                }, Modifier.weight(1f)) { Text("移出回收站") }
-                                Button(onClick = {
-                                    previewVisible = false
-                                    previewSession++
-                                    previewIndex = -1
-                                    scope.launch { viewModel.deleteFromTrash(listOf(current.mediaId)) }
-                                }, Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("永久删除") }
+                            // 设计图底部动作：居中深色胶囊（恢复/删除，图标上文字下），替换
+                            // 原来的两颗文字按钮。照片即将从列表消失，不飞行回位——bump 会话号
+                            // 直接销毁预览。
+                            Box(Modifier.fillMaxWidth().padding(bottom = 10.dp), contentAlignment = Alignment.Center) {
+                                TrashActionPill(
+                                    restoreEnabled = true,
+                                    deleteEnabled = true,
+                                    onRestore = {
+                                        previewVisible = false
+                                        previewSession++
+                                        previewIndex = -1
+                                        onRestore(listOf(current.mediaId))
+                                    },
+                                    onDelete = {
+                                        previewVisible = false
+                                        previewSession++
+                                        previewIndex = -1
+                                        scope.launch { viewModel.deleteFromTrash(listOf(current.mediaId)) }
+                                    },
+                                )
                             }
                         }
                     )
@@ -1674,15 +1861,14 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     var closing by remember { mutableStateOf(false) }
     // 打开飞行结束（同回收站）：cell 换哑 key → foundMatch=false → 预览从 overlay 落回原位。
     var previewSettled by remember { mutableStateOf(false) }
-    // Cell-sized decode target for the 3-column memory grid (same trick as RecycleBin).
+    // Cell-sized decode target for the 4-column memory grid (same trick as RecycleBin).
     val gridCellPx = with(LocalDensity.current) {
-        (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
+        (LocalConfiguration.current.screenWidthDp.dp.toPx() / 4f).roundToInt()
     }
     val gridThumbSize = remember(gridCellPx) { CoilSize(gridCellPx, gridCellPx) }
-    // One grid row = cell + vertical spacing (6dp); approximates the scroll offset from the
-    // first visible item's index, used by the spring pull's limit detection.
-    val localDensity = LocalDensity.current
-    val gridRowPx = remember(gridCellPx) { gridCellPx + with(localDensity) { 6.dp.toPx() }.roundToInt() }
+    // One grid row = cell（4 列密铺零间距，与回收站宫格同排版）; approximates the scroll offset
+    // from the first visible item's index, used by the spring pull's limit detection.
+    val gridRowPx = gridCellPx
     val scope = rememberCoroutineScope()
     // System back (including the edge-swipe gesture) returns to the home screen. While the
     // preview is open, SharedPhotoPreview's own BackHandler (composed later) closes it first.
@@ -1749,18 +1935,14 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                             } else {
                                 LazyVerticalGrid(
                                     state = gridState,
-                                    columns = GridCells.Fixed(3),
+                                    columns = GridCells.Fixed(4),
                                     modifier = Modifier.fillMaxSize(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
                                     flingBehavior = rememberGentleFlingBehavior()
                                 ) {
                                     itemsIndexed(photos) { index, photo ->
                                         Box(
                                             Modifier
                                                 .aspectRatio(1f)
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .background(dc.white)
                                                 .clickable {
                                                     previewSession++
                                                     flyingMediaId = photo.mediaId; openedMediaId = photo.mediaId; closing = false
@@ -1769,7 +1951,7 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                                 }
                                         ) {
                                             SharedGridImage(
-                                                photo, 12.dp, Modifier.fillMaxSize(),
+                                                photo, 0.dp, Modifier.fillMaxSize(),
                                                 gridSize = gridThumbSize,
                                                 // 关闭帧的 sharedKey 重排(同回收站):该起飞的 cell
                                                 // 顶上 base key,其余 cell 换成唯一哑 key。
@@ -1782,7 +1964,8 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                                 fitOnEnter = photo.mediaId == flyingMediaId,
                                                 sharedVisible = !previewOpen,
                                             )
-                                            VideoBadge(photo, Modifier.fillMaxSize(), centerSize = 26.dp, textSize = 9)
+                                            // 与回收站宫格同款视频角标（左下角播放三角 + 时长）。
+                                            GridVideoBadge(photo, Modifier.fillMaxSize())
                                         }
                                     }
                                 }
@@ -1808,7 +1991,8 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                         fullScreenPhotoArea = true,
                         tapToToggleChrome = true,
                         doubleTapToZoom = true,
-                        cellCornerRadius = 12.dp,
+                        // 宫格已改 4 列密铺直角格子，飞行起点圆角必须与 cell 一致（坑 9 两侧一致）。
+                        cellCornerRadius = 0.dp,
                          onCloseStarted = { currentMediaId ->
                              // 同回收站:关闭流程启动时记住要起飞的当前照片并重排 cell key,
                              // 必须赶在 visible 翻转之前完成。
