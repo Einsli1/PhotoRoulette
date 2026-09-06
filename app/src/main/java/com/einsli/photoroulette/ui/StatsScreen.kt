@@ -188,16 +188,41 @@ fun StatsScreen(
                         }
                     }
                     // ── 周卡片 ↔ 外层 Tab pager 的横向隔离 ──
-                    // 内层周 pager 滑到尽头(本周往左/最早一周往右)后,剩余的横向位移与惯性
-                    // 速度全部在这里消费掉,绝不交给外层 Tab pager(否则继续滑会切 Tab 页);
-                    // 纵向分量一律放行(返回 Offset/Velocity 的 y 恒为 0),页面垂直滚动与
-                    // SpringPull 手感完全不受影响。
-                    // 只挂 post 通路:不碰 onPreScroll/onPreFling,周 pager 自己的拖拽/吸附
-                    // 照常先消费、到边界才轮到本 connection,pager 自身手势行为零改变;
-                    // 且本 connection 只收得到周 pager 子树向上派发的 delta(垂直滚动 Column、
-                    // SpringPullBox 都在它上游),宫格卡片之外的滚动/翻页不经过它。
+                    // 内层周 pager 滑到尽头(本周往左/最早一周往右)后,横向位移与惯性速度
+                    // 绝不交给外层 Tab pager(否则继续滑会切 Tab 页);纵向分量一律放行
+                    // (返回 Offset/Velocity 的 y 恒为 0),页面垂直滚动与 SpringPull 手感
+                    // 完全不受影响。
+                    // pre 通路(修「尽头按住不松手卡片抖动」):pager 已在该方向边界且 delta
+                    // 朝外时,在 pre 阶段直接消费,pager 根本收不到这次位移——否则 pager
+                    // 每帧先收到朝外 delta、内容漂移越界再被钳回(实测 ~3px/帧漂移、每
+                    // ~14 帧弹回一次、振幅 ~43px 的锯齿抖动)。拖动中途才到边的场景不受
+                    // 影响:到边之前 canScrollForward/Backward 仍为 true、pre 不消费,
+                    // pager 正常跟手;到边之后 pre 才接管。
+                    // post 通路保留兜底:到边那一帧(pre 判定还是 true)的剩余位移、以及
+                    // 朝外的剩余惯性速度,仍在此消费,外层 Tab 照旧纹丝不动。
+                    // onPreFling 不需要:fling 的逐帧 delta 同样走 onPreScroll(source=
+                    // SideEffect)被拦,朝外 fling 不会抖;残余速度由 onPostFling 吃掉。
+                    // 本 connection 只收得到周 pager 子树向上派发的 delta(垂直滚动
+                    // Column、SpringPullBox 都在它上游),卡片之外的滚动/翻页不经过它。
+                    val pagerStateRef by rememberUpdatedState(pagerState)
                     val weekPagerEdgeIsolation = remember {
                         object : NestedScrollConnection {
+                            override fun onPreScroll(
+                                available: Offset,
+                                source: NestedScrollSource,
+                            ): Offset {
+                                val state = pagerStateRef
+                                val dx = available.x
+                                // 注意符号:available.x 跟随手指(拖左=负、拖右=正)。
+                                // 尽头页(本周,!canScrollForward)继续拖左 → dx<0,直接消费;
+                                // 最早页(!canScrollBackward)继续拖右 → dx>0,直接消费。
+                                return when {
+                                    dx < 0 && !state.canScrollForward -> Offset(dx, 0f)
+                                    dx > 0 && !state.canScrollBackward -> Offset(dx, 0f)
+                                    else -> Offset.Zero
+                                }
+                            }
+
                             override fun onPostScroll(
                                 consumed: Offset,
                                 available: Offset,
