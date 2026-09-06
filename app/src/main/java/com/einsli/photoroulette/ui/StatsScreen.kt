@@ -41,9 +41,14 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.einsli.photoroulette.AppUiState
@@ -182,11 +187,33 @@ fun StatsScreen(
                             latestCommit(if (monday == thisMonday) null else monday)
                         }
                     }
+                    // ── 周卡片 ↔ 外层 Tab pager 的横向隔离 ──
+                    // 内层周 pager 滑到尽头(本周往左/最早一周往右)后,剩余的横向位移与惯性
+                    // 速度全部在这里消费掉,绝不交给外层 Tab pager(否则继续滑会切 Tab 页);
+                    // 纵向分量一律放行(返回 Offset/Velocity 的 y 恒为 0),页面垂直滚动与
+                    // SpringPull 手感完全不受影响。
+                    // 只挂 post 通路:不碰 onPreScroll/onPreFling,周 pager 自己的拖拽/吸附
+                    // 照常先消费、到边界才轮到本 connection,pager 自身手势行为零改变;
+                    // 且本 connection 只收得到周 pager 子树向上派发的 delta(垂直滚动 Column、
+                    // SpringPullBox 都在它上游),宫格卡片之外的滚动/翻页不经过它。
+                    val weekPagerEdgeIsolation = remember {
+                        object : NestedScrollConnection {
+                            override fun onPostScroll(
+                                consumed: Offset,
+                                available: Offset,
+                                source: NestedScrollSource,
+                            ): Offset = Offset(available.x, 0f)
+
+                            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity =
+                                Velocity(available.x, 0f)
+                        }
+                    }
                     // 关掉 pager 边缘的 stretch overscroll:到边界就停,内容不撑出卡片圆角。
                     CompositionLocalProvider(LocalOverscrollConfiguration provides null) {
                         HorizontalPager(
                             state = pagerState,
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().nestedScroll(weekPagerEdgeIsolation),
+                            pageSpacing = 14.dp,
                             userScrollEnabled = !popupBusy,
                         ) { page ->
                             val monday = fm.plusWeeks(page.toLong())
