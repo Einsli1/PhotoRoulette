@@ -558,6 +558,10 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     // 不重排的话,同帧「key 换手 + visible 翻转」会把翻转配到旧 base key 上,base cell
     // 会跟着起飞(画面变成点开的那张),当前 cell 只能拿到退化匹配在自己格子里 morph。
     var closing by remember { mutableStateOf(false) }
+    // 打开飞行结束(预览已稳定、不再飞行):把 cell 换成唯一哑 key → foundMatch=false → 预览从
+    // shared-transition overlay 落回原位(chrome 不再被照片盖住)。关闭时 closing 分支优先,
+    // 重新配对返回飞行。
+    var previewSettled by remember { mutableStateOf(false) }
     // Page-level back returns to Settings. While the preview is open, SharedPhotoPreview's own
     // BackHandler (composed later) wins and closes the preview first.
     BackHandler(onBack = onBack)
@@ -584,6 +588,12 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     // 合成的位置起飞（见 previewVisible 的注释）。
     key(previewSession) {
     PhotoSharedTransitionLayout {
+        // 打开飞行结束(预览已可见、isTransitionActive 回 false)后置 previewSettled:所有 cell
+        // 换成唯一哑 key → foundMatch=false → 预览从 shared-transition overlay 落回原位,
+        // 标题/按钮才浮在照片上层(不再被照片盖住)。
+        LaunchedEffect(previewOpen, previewVisible, isTransitionActive, closing) {
+            previewSettled = previewOpen && previewVisible && !isTransitionActive && !closing
+        }
         Box(Modifier.fillMaxSize().background(dc.pageBg)) {
             // ── 页面层：常驻组合（AnimatedVisibility(visible=true) 只提供 shared-element scope，
             //    永不进出组合）── 预览开关不再重组合页面：下滑返回时缩略图/滚动原位保留，
@@ -683,6 +693,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                                             flyingMediaId = photo.mediaId
                                                             openedMediaId = photo.mediaId
                                                             closing = false
+                                                            previewSettled = false
                                                             previewIndex = index
                                                         },
                                                         onLongPress = { selected = if (liveChecked) selected - photo.mediaId else selected + photo.mediaId }
@@ -697,6 +708,9 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                                 } else {
                                                     "trashDummy" + photo.mediaId
                                                 }
+                                                // 打开飞行结束后:预览不再需要和 cell 配对,cell 换唯一哑 key
+                                                // → foundMatch=false → 预览从 overlay 落回原位。
+                                                previewSettled -> "trashSettled" + photo.mediaId
                                                 else -> photoSharedKey(photo.mediaId)
                                             }
                                             SharedGridImage(
@@ -1616,6 +1630,8 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     var openedMediaId by remember { mutableLongStateOf(-1L) }
     // 关闭流程进行中（同回收站）：把「该起飞的 cell」的 sharedKey 顶成 base key、其余下线。
     var closing by remember { mutableStateOf(false) }
+    // 打开飞行结束（同回收站）：cell 换哑 key → foundMatch=false → 预览从 overlay 落回原位。
+    var previewSettled by remember { mutableStateOf(false) }
     // Cell-sized decode target for the 3-column memory grid (same trick as RecycleBin).
     val gridCellPx = with(LocalDensity.current) {
         (LocalConfiguration.current.screenWidthDp.dp.toPx() / 3f).roundToInt()
@@ -1636,6 +1652,10 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     // 清零，打开帧宫格 measure 时刷新到当前位置（同回收站）。
     key(previewSession) {
     PhotoSharedTransitionLayout {
+        // 打开飞行结束后置 previewSettled（同回收站）：预览从 overlay 落回原位,chrome 不再被盖。
+        LaunchedEffect(previewOpen, previewVisible, isTransitionActive, closing) {
+            previewSettled = previewOpen && previewVisible && !isTransitionActive && !closing
+        }
         Box(Modifier.fillMaxSize().background(dc.pageBg)) {
             // ── 页面层：常驻组合（同回收站：AnimatedVisibility(visible=true) 只提供 scope）──
             AnimatedVisibility(
@@ -1702,6 +1722,7 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                                 .clickable {
                                                     previewSession++
                                                     flyingMediaId = photo.mediaId; openedMediaId = photo.mediaId; closing = false
+                                                    previewSettled = false
                                                     previewIndex = index
                                                 }
                                         ) {
@@ -1710,10 +1731,12 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                                 gridSize = gridThumbSize,
                                                 // 关闭帧的 sharedKey 重排(同回收站):该起飞的 cell
                                                 // 顶上 base key,其余 cell 换成唯一哑 key。
-                                                sharedKey = if (closing) {
-                                                    if (photo.mediaId == flyingMediaId) photoSharedKey(openedMediaId)
-                                                    else "memoryDummy" + photo.mediaId
-                                                } else photoSharedKey(photo.mediaId),
+                                                sharedKey = when {
+                                                    closing -> if (photo.mediaId == flyingMediaId) photoSharedKey(openedMediaId)
+                                                        else "memoryDummy" + photo.mediaId
+                                                    previewSettled -> "memorySettled" + photo.mediaId
+                                                    else -> photoSharedKey(photo.mediaId)
+                                                },
                                                 fitOnEnter = photo.mediaId == flyingMediaId,
                                                 sharedVisible = !previewOpen,
                                             )
