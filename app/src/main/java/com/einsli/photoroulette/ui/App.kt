@@ -150,13 +150,13 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
     // 属同一次 UserInput 滚动)还在跑时点了 Tab,MutatorMutex 发现新调用优先级更低,对调用
     // 方抛异常。没有 catch 时整个消费循环被杀死:之后 navigate 照常写 page(图标切换)、
     // trySend 到 CONFLATED 通道照常成功,但再也没人执行动画 —— 「图标切了、页面不切」且
-    // 本次会话内永不自愈(2026-09-06 报障的根因)。所以必须 catch 住、等手势(含惯性/吸附)
-    // 彻底结束再重试,直到 currentPage 真正落到目标页;catch 里 ensureActive:组合销毁导致
-    // 的真取消(本协程 Job 被取消)照常传播,不能吞。
+    // 本次会话内永不自愈(2026-09-06 报障的根因)。catch 里 ensureActive:组合销毁导致的
+    // 真取消(本协程 Job 被取消)照常传播,不能吞。
+    // 重试之间必须用 withFrameNanos 做真正让出线程的挂起(原因见 catch 内注释)——用
+    // snapshotFlow 之类「可能同步恢复」的等待顶替,会和打断者形成 trampoline 饿死互锁。
     // 守卫不读 targetPage:PagerState.scroll 对 programmaticScrollTargetPage 的重置没有
-    // try/finally,动画被打断后该值滞留,isScrollInProgress 期间 targetPage 会返回旧目标,
-    // 拿它做守卫会漏掉本该执行的动画。只认 currentPage —— 已停到目标页时 while 不执行,
-    // 不会叠加第二套动画。
+    // try/finally,动画被打断后该值滞留,isScrollInProgress 期间 targetPage 会返回旧目标。
+    // 只认 currentPage —— 已停到目标页时 while 不执行,不会叠加第二套动画。
     LaunchedEffect(pagerState) {
         for (idx in tabClicks) {
             if (idx < 0) continue // 沉浸页期间 pager 保持原位:总是从当前 Tab 打开,返回露出的就是它
@@ -165,7 +165,23 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
                     pagerState.animateScrollToPage(idx)
                 } catch (e: CancellationException) {
                     ensureActive()
-                    snapshotFlow { pagerState.isScrollInProgress }.first { !it }
+                    // 重试前必须有「时间上真正流逝」的挂起,绝不能让重试链同步连转。
+                    // 真机实测(2026-09-06,100% 复现):拖拽打断点击动画的那一瞬间,打断者
+                    // 只完成了 MutatorMutex.tryMutateOrCancel —— 已经占住 currentMutator
+                    // (UserInput > Default,所以下一次重试会同步抛 "higher priority"),
+                    // 但它的 scroll block 还排在 dispatcher 队列里没开始跑,此刻
+                    // isScrollInProgress 仍是 false。AndroidUiDispatcher 的 trampoline 会把
+                    // 「同步抛 → catch → 同步返回的等待 → 重试」整条链在一个 dispatch 里无限
+                    // 连转(实测 2 秒 30 万拍、主线程 100%、输入事件全部饿死),打断者自己的
+                    // 恢复永远排不上队 → 互斥量永久被占 → 页面冻结、永不自愈。
+                    // withFrameNanos 走 Choreographer 等下一帧,必然真正让出线程:打断者的
+                    // block 得以启动,isScrollInProgress 才会变 true,下面的等待才有意义。
+                    withFrameNanos { }
+                    // 打断者的滚动(拖拽/惯性吸附)真在跑就礼貌等它结束(帧 paced,不轮询);
+                    // 已结束则直接重试 —— 此刻 mutex 已空,重试会成功。
+                    if (pagerState.isScrollInProgress) {
+                        snapshotFlow { pagerState.isScrollInProgress }.first { !it }
+                    }
                 }
             }
         }
