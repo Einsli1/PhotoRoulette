@@ -26,7 +26,7 @@
 | `media/MediaScanner.kt` | MediaStore 扫描，读取 SIZE 字段；`scanExisting()` 全量存在性查询（MATCH_INCLUDE 含系统回收站/PENDING 文件，返回 existing+trashed 两个集合）；`isFileReadable()` 单行文件活性探测（openFileDescriptor），供对账用 |
 | `ui/App.kt` | **页面路由中枢**：底部导航 + 全部页面的组合函数（设置/整理/回收站/回忆浏览等） |
 | `ui/Home.kt` | 首页（无滚动，weight spacer 铺满） |
-| `ui/StatsScreen.kt` | 统计页（7 天趋势柱状图 + 本周汇总 + 长期统计 + 累计统计三卡；右上角「历史」入口按周回看任意一周，周趋势/周汇总同一套视图） |
+| `ui/StatsScreen.kt` | 统计页（7 天趋势柱状图 + 本周汇总 + 长期统计 + 累计统计三卡；右上角「历史」入口按周回看任意一周，周趋势/周汇总同一套视图。周卡片内部是 HorizontalPager：整卡内容跟手连续翻周、边界=最早周/本周，落定才写回 historyWeek；每个 page 自订阅 `viewModel.weekStatsOf(monday)`，加载瞬间全 0 占位；月历弹层打开时 `userScrollEnabled=false` 禁滑；pager 边缘 stretch overscroll 用 `LocalOverscrollConfiguration=null` 关掉，内容不出卡片圆角） |
 | `ui/SpringPull.kt` | **弹性滚动手感**：`SpringPullBox`（nested-scroll 弹性跟手 + 甩到极限弹簧回弹）+ `rememberGentleFlingBehavior`（0.5 阻尼惯性、撞限返回 0 剩余速度） |
 | `ui/Theme.kt` | M3 浅/深 fallback 配色（紫色系）；dynamic color 关闭时生效 |
 | `ui/DesignColors.kt` | **设计调色板**：深浅两套，`designColors()` 按主题自动切换 |

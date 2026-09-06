@@ -360,12 +360,11 @@ private fun PageContent(
         4 -> {
             // 历史整理:按周显示和切换,选中历史日期即查看它所在的一周。
             val historyWeek by viewModel.historyWeek.collectAsStateWithLifecycle()
-            val historyWeekStats by viewModel.historyWeekStats.collectAsStateWithLifecycle()
             StatsScreen(
                 state,
                 historyWeek = historyWeek,
-                historyWeekStats = historyWeekStats,
                 onSelectHistoryWeek = viewModel::selectHistoryWeek,
+                weekStatsOf = viewModel::weekStatsOf,
                 earliestMonth = viewModel::earliestHistoryMonth,
                 monthDayCounts = viewModel::monthDayCounts,
             )

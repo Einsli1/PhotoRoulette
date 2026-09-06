@@ -8,7 +8,6 @@ import androidx.lifecycle.viewModelScope
 import com.einsli.photoroulette.data.*
 import com.einsli.photoroulette.media.PreviewCache
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.*
@@ -158,13 +157,9 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     private val selectedWeek = MutableStateFlow<LocalDate?>(null)
     val historyWeek: StateFlow<LocalDate?> = selectedWeek.asStateFlow()
     fun selectHistoryWeek(weekMonday: LocalDate?) { selectedWeek.value = weekMonday }
-    // 切换周即换窗口重新订阅;WhileSubscribed 让它只在统计页可见时跑。
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val historyWeekStats: StateFlow<WeekStats?> = selectedWeek
-        .flatMapLatest { monday ->
-            if (monday == null) flowOf(null) else weekStatsFlow(monday)
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    // 统计页周卡片按需取某一周的统计:每个 pager 页面自订阅自己那周(冷流,离开视口即停订),
+    // 取代原先只跟选中周的 historyWeekStats 单流——连续翻周时相邻页也要有数据。
+    fun weekStatsOf(monday: LocalDate): Flow<WeekStats> = weekStatsFlow(monday)
     // 历史月历的起始月 = 最早的 processedAt 月份。processedAt 只会是"现在",下限不会变,
     // 进程内缓存即可;重置整理记录(reset)后失效重查。
     @Volatile private var minHistoryMonthCache: YearMonth? = null

@@ -1,9 +1,12 @@
 package com.einsli.photoroulette.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalOverscrollConfiguration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,27 +27,34 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.einsli.photoroulette.AppUiState
 import com.einsli.photoroulette.WeekStats
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
+import java.time.temporal.ChronoUnit
 import kotlin.math.roundToInt
 
 private fun formatBytes(b: Long): String {
@@ -73,17 +83,22 @@ private fun weekRangeHeader(monday: LocalDate): String {
     return "${monday.monthValue}月${monday.dayOfMonth}日 - ${sunday.monthValue}月${sunday.dayOfMonth}日"
 }
 
+/** 某周统计尚未加载出来时的全 0 占位(既有约定)。 */
+private val EMPTY_WEEK_STATS = WeekStats(List(7) { 0 }, 0, 0, 0L)
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun StatsScreen(
     state: AppUiState,
     historyWeek: LocalDate? = null,
-    historyWeekStats: WeekStats? = null,
     onSelectHistoryWeek: (LocalDate?) -> Unit = {},
+    weekStatsOf: (LocalDate) -> Flow<WeekStats> = { flowOf(EMPTY_WEEK_STATS) },
     earliestMonth: suspend () -> YearMonth = { YearMonth.now() },
     monthDayCounts: suspend (YearMonth) -> Map<LocalDate, Int> = { emptyMap() },
 ) {
     val dc = designColors()
     val scroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
     val stats = state.stats
     val week = state.week
     val cumulative = state.cumulative
@@ -93,26 +108,16 @@ fun StatsScreen(
     val keepPct = if (processed > 0) (stats.kept * 100.0 / processed).roundToInt() else 0
     val daysLeft = if (state.settings.dailyCount > 0)
         ((total - processed).toDouble() / state.settings.dailyCount).let { kotlin.math.ceil(it).toInt() } else 0
-    // 展示哪一周:选中历史周用它的数据(加载瞬间给全 0 占位),否则就是本周。
-    val isHistory = historyWeek != null
-    val shownMonday = historyWeek ?: LocalDate.now().with(DayOfWeek.MONDAY)
-    val atCurrentWeek = shownMonday == LocalDate.now().with(DayOfWeek.MONDAY)
-    val shownWeek = if (isHistory)
-        historyWeekStats ?: WeekStats(List(7) { 0 }, 0, 0, 0L)
-    else week
+    val thisMonday = remember { LocalDate.now().with(DayOfWeek.MONDAY) }
+    val latestCommit by rememberUpdatedState(onSelectHistoryWeek)
 
-    // 切换到某个周一所在周;目标就是本周时回到「本周整理」(null)。
-    val commitWeek: (LocalDate) -> Unit = { monday ->
-        val thisMonday = LocalDate.now().with(DayOfWeek.MONDAY)
-        onSelectHistoryWeek(if (monday == thisMonday) null else monday)
+    // ── 周卡片翻页范围:页 0 = 最早记录所在周的周一(取 earliestMonth 月初那一周),
+    //    最后一页 = 本周。范围异步查出,查出前先按当前查看周静态渲染。 ──
+    var firstMonday by remember { mutableStateOf<LocalDate?>(null) }
+    LaunchedEffect(Unit) { firstMonday = earliestMonth().atDay(1).with(DayOfWeek.MONDAY) }
+    val weekCount = firstMonday?.let {
+        (ChronoUnit.WEEKS.between(it, thisMonday) + 1).toInt().coerceAtLeast(1)
     }
-    val onPrevWeek = { commitWeek(shownMonday.minusDays(7)) }
-    val onNextWeek = { if (!atCurrentWeek) commitWeek(shownMonday.plusDays(7)) }
-    // 手势滑动翻周:右滑=上一周,左滑=下一周。阈值 55dp,只在拖拽结束时判定。
-    val latestPrev by rememberUpdatedState(onPrevWeek)
-    val latestNext by rememberUpdatedState(onNextWeek)
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val swipePx = remember { with(density) { 55.dp.toPx() } }
 
     // Spring pull in both directions; engages only at the scroll limits (nested scroll also
     // swallows the platform stretch overscroll).
@@ -132,48 +137,85 @@ fun StatsScreen(
         Text("统计", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = dc.ink)
         Spacer(Modifier.height(14.dp))
 
-        // ── 本周整理 / 历史整理(同一套周视图:7 天趋势 + 周汇总) ──
+        // ── 本周整理 / 历史整理(同一套周视图:7 天趋势 + 周汇总),左右滑动连续翻周 ──
         Card(
             shape = RoundedCornerShape(22.dp),
             colors = CardDefaults.cardColors(containerColor = dc.card),
             elevation = CardDefaults.cardElevation(0.dp)
         ) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .pointerInput(swipePx) {
-                        var acc = 0f
-                        detectHorizontalDragGestures(
-                            onDragEnd = {
-                                if (acc > swipePx) latestPrev() else if (acc < -swipePx) latestNext()
-                                acc = 0f
-                            },
-                            onHorizontalDrag = { change, dragAmount ->
-                                change.consume()
-                                acc += dragAmount
+            // 月历弹层打开期间禁用卡片左右滑动(弹层收起后恢复)。
+            var popupBusy by remember { mutableStateOf(false) }
+            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                val fm = firstMonday
+                if (fm == null || weekCount == null) {
+                    // 翻页范围还没查出来:先按当前查看周静态渲染,与 pager 对应页内容一致,不闪变。
+                    WeekCardContent(
+                        monday = historyWeek ?: thisMonday,
+                        thisMonday = thisMonday,
+                        currentWeek = week,
+                        atCurrentWeek = (historyWeek ?: thisMonday) == thisMonday,
+                        canPrevWeek = false,
+                        onPrevWeek = {}, onNextWeek = {}, onPickWeek = {},
+                        onPopupExpandedChange = {},
+                        weekStatsOf = weekStatsOf,
+                        earliestMonth = earliestMonth,
+                        monthDayCounts = monthDayCounts,
+                    )
+                } else {
+                    val pagerState = rememberPagerState(initialPage = weekCount - 1) { weekCount }
+                    // 切 Tab 返回时 pager 状态重建:恢复上次查看的周(只做一次)。
+                    var restored by rememberSaveable { mutableStateOf(false) }
+                    LaunchedEffect(pagerState) {
+                        if (!restored) {
+                            restored = true
+                            historyWeek?.let { hw ->
+                                val idx = ChronoUnit.WEEKS.between(fm, hw).toInt().coerceIn(0, weekCount - 1)
+                                if (idx != pagerState.currentPage) pagerState.scrollToPage(idx)
                             }
-                        )
+                        }
                     }
-            ) {
-                HistoryWeekHeader(
-                    isHistory = isHistory,
-                    monday = shownMonday,
-                    atCurrentWeek = atCurrentWeek,
-                    onPrevWeek = onPrevWeek,
-                    onNextWeek = onNextWeek,
-                    onPickWeek = commitWeek,
-                    earliestMonth = earliestMonth,
-                    monthDayCounts = monthDayCounts,
-                )
-                Spacer(Modifier.height(12.dp))
-                WeekTrendChart(shownWeek.days, shownMonday)
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    WeekMini(if (isHistory) "整理" else "本周整理", "${shownWeek.organized} 张", Modifier.weight(1f), dc)
-                    WeekMini("删除", "${shownWeek.deleted} 张", Modifier.weight(1f), dc)
-                    WeekMini("保留", "${shownWeek.kept} 张", Modifier.weight(1f), dc)
-                    WeekMini("释放", formatBytes(shownWeek.freedBytes), Modifier.weight(1f), dc)
+                    // 翻页落定后把当前周写回选中状态(目标 = 本周时清空历史选中);
+                    // pager 位置是唯一事实源,外部入口只负责驱动 pager,不反向监听动画,避免坑 26。
+                    LaunchedEffect(pagerState) {
+                        snapshotFlow { pagerState.settledPage }.collect { page ->
+                            val monday = fm.plusWeeks(page.toLong())
+                            latestCommit(if (monday == thisMonday) null else monday)
+                        }
+                    }
+                    // 关掉 pager 边缘的 stretch overscroll:到边界就停,内容不撑出卡片圆角。
+                    CompositionLocalProvider(LocalOverscrollConfiguration provides null) {
+                        HorizontalPager(
+                            state = pagerState,
+                            modifier = Modifier.fillMaxWidth(),
+                            userScrollEnabled = !popupBusy,
+                        ) { page ->
+                            val monday = fm.plusWeeks(page.toLong())
+                            WeekCardContent(
+                                monday = monday,
+                                thisMonday = thisMonday,
+                                currentWeek = week,
+                                atCurrentWeek = monday == thisMonday,
+                                canPrevWeek = page > 0,
+                                onPrevWeek = {
+                                    scope.launch { pagerState.animateScrollToPage((page - 1).coerceAtLeast(0)) }
+                                },
+                                onNextWeek = {
+                                    if (monday < thisMonday) {
+                                        scope.launch { pagerState.animateScrollToPage(page + 1) }
+                                    }
+                                },
+                                onPickWeek = { target ->
+                                    val idx = ChronoUnit.WEEKS.between(fm, target).toInt()
+                                        .coerceIn(0, weekCount - 1)
+                                    scope.launch { pagerState.animateScrollToPage(idx) }
+                                },
+                                onPopupExpandedChange = { popupBusy = it },
+                                weekStatsOf = weekStatsOf,
+                                earliestMonth = earliestMonth,
+                                monthDayCounts = monthDayCounts,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -291,6 +333,53 @@ fun StatsScreen(
     }
 }
 
+/** 周卡片单页内容:周头部 + 7 天趋势图 + 周汇总四格。pager 每个 page 一份。
+ *  本周页直接用实时的 state.week;历史页按需订阅该周的统计流(加载瞬间全 0 占位)。 */
+@Composable
+private fun WeekCardContent(
+    monday: LocalDate,
+    thisMonday: LocalDate,
+    currentWeek: WeekStats,
+    atCurrentWeek: Boolean,
+    canPrevWeek: Boolean,
+    onPrevWeek: () -> Unit,
+    onNextWeek: () -> Unit,
+    onPickWeek: (LocalDate) -> Unit,
+    onPopupExpandedChange: (Boolean) -> Unit,
+    weekStatsOf: (LocalDate) -> Flow<WeekStats>,
+    earliestMonth: suspend () -> YearMonth,
+    monthDayCounts: suspend (YearMonth) -> Map<LocalDate, Int>,
+) {
+    val dc = designColors()
+    val isCurrentWeek = monday == thisMonday
+    val week = if (isCurrentWeek) currentWeek
+    else remember(monday) { weekStatsOf(monday) }.collectAsState(EMPTY_WEEK_STATS).value
+
+    Column(Modifier.fillMaxWidth()) {
+        HistoryWeekHeader(
+            isHistory = !isCurrentWeek,
+            monday = monday,
+            atCurrentWeek = atCurrentWeek,
+            canPrev = canPrevWeek,
+            onPrevWeek = onPrevWeek,
+            onNextWeek = onNextWeek,
+            onPickWeek = onPickWeek,
+            onPopupExpandedChange = onPopupExpandedChange,
+            earliestMonth = earliestMonth,
+            monthDayCounts = monthDayCounts,
+        )
+        Spacer(Modifier.height(12.dp))
+        WeekTrendChart(week.days, monday)
+        Spacer(Modifier.height(12.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            WeekMini(if (isCurrentWeek) "本周整理" else "整理", "${week.organized} 张", Modifier.weight(1f), dc)
+            WeekMini("删除", "${week.deleted} 张", Modifier.weight(1f), dc)
+            WeekMini("保留", "${week.kept} 张", Modifier.weight(1f), dc)
+            WeekMini("释放", formatBytes(week.freedBytes), Modifier.weight(1f), dc)
+        }
+    }
+}
+
 /** Simple Material-3 style bar chart: the week starting [monday], Monday first, today
  *  highlighted (only when viewing the current week — a historical week has no "today").
  *  Days that have not arrived yet show an empty slot (label only). The plot area (bars) has
@@ -391,9 +480,11 @@ private fun HistoryWeekHeader(
     isHistory: Boolean,
     monday: LocalDate,
     atCurrentWeek: Boolean,
+    canPrev: Boolean,
     onPrevWeek: () -> Unit,
     onNextWeek: () -> Unit,
     onPickWeek: (LocalDate) -> Unit,
+    onPopupExpandedChange: (Boolean) -> Unit,
     earliestMonth: suspend () -> YearMonth,
     monthDayCounts: suspend (YearMonth) -> Map<LocalDate, Int>,
 ) {
@@ -405,9 +496,10 @@ private fun HistoryWeekHeader(
     var calCounts by remember { mutableStateOf<Map<LocalDate, Int>>(emptyMap()) }
     var minMonth by remember { mutableStateOf<YearMonth?>(null) }
     LaunchedEffect(popup.expanded) { if (popup.expanded) calMonth = YearMonth.from(monday) }
+    LaunchedEffect(popup.expanded) { onPopupExpandedChange(popup.expanded) }
     LaunchedEffect(Unit) { minMonth = earliestMonth() }
     LaunchedEffect(calMonth) { calCounts = monthDayCounts(calMonth) }
-    val canPrev = minMonth == null || calMonth > minMonth
+    val canPrevMonth = minMonth == null || calMonth > minMonth
     val canNext = calMonth < YearMonth.now()
 
     Box {
@@ -424,6 +516,7 @@ private fun HistoryWeekHeader(
             // 紧凑的周切换组:‹ 日期 › 整体靠右,间距紧,日期在上箭头之间垂直居中。
             SwipeArrow(
                 onClick = onPrevWeek,
+                enabled = canPrev,
                 icon = { tint -> Icon(Icons.Default.KeyboardArrowLeft, "上一周", tint = tint, modifier = Modifier.size(20.dp)) },
             )
             Text(
@@ -450,9 +543,9 @@ private fun HistoryWeekHeader(
                 counts = calCounts,
                 today = today,
                 viewedMonday = monday,
-                canPrev = canPrev,
+                canPrev = canPrevMonth,
                 canNext = canNext,
-                onPrevMonth = { if (canPrev) calMonth = calMonth.minusMonths(1) },
+                onPrevMonth = { if (canPrevMonth) calMonth = calMonth.minusMonths(1) },
                 onNextMonth = { if (canNext) calMonth = calMonth.plusMonths(1) },
                 onPickDay = { d ->
                     popup.close()
