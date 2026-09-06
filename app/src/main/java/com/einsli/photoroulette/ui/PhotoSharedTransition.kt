@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -51,6 +52,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -453,9 +455,12 @@ fun SharedTransitionScope.SharedPhotoPreview(
             videoStaticFlight = true // 打开飞行用静态帧起跑，落定后再挂播放器
             zoomResetTick++ // 强制当前照片缩回 1x（新打开的照片从 1x 起步）
             pagerState.scrollToPage(initialIndex.coerceIn(0, (openPhotos.size - 1).coerceAtLeast(0)))
-            delay(PhotoTransitionMillis + 30L)
-            videoStaticFlight = false // 飞行结束：挂载播放器（静态帧继续盖到 prepared）
+            // 飞行落定瞬间标题/按钮立刻开始出现动画（动画时长/曲线不变，只去掉多余的额外延迟）。
+            delay(PhotoTransitionMillis.toLong())
             chromeRevealed = true
+            // 播放器仍稍晚一拍挂载：等 bounds 动画彻底收尾（静态帧一直盖着，无视觉差异）。
+            delay(30L)
+            videoStaticFlight = false
         }
     }
     val chromeRevealAlpha by animateFloatAsState(
@@ -658,6 +663,27 @@ fun SharedTransitionScope.SharedPhotoPreview(
             ) {
                 photoContent()
             }
+            // 顶部渐变蒙层：亮色照片上保证标题白字可读（黑色向下淡出，不显眼）。
+            // 跟随 chrome 显隐通路：出现时随 chromeRevealAlpha 淡入、隐藏/拖拽/关闭时随
+            // chromeProgress 与标题一起飞出；只存在于全屏预览分支（整理页不加渐变底，坑 21）。
+            // 画在照片之上、标题行之下；无 pointer 输入，不挡手势（预览根部已有吸收层）。
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(statusBarTop + 72.dp)
+                    // graphicsLayer 必须在 background 之前:background 画在它所在位置,
+                    // 放在后面的话 alpha/translation 只作用于 children(空),蒙层就会常驻不隐。
+                    .graphicsLayer {
+                        alpha = chromeRevealAlpha
+                        translationY = -chromeProgress * chromeExitPx
+                    }
+                    .background(
+                        Brush.verticalGradient(
+                            0f to Color.Black.copy(alpha = 0.4f),
+                            1f to Color.Transparent,
+                        )
+                    )
+            )
             Column(
                 Modifier
                     .fillMaxSize()
