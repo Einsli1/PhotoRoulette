@@ -9,12 +9,15 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
@@ -31,6 +34,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
@@ -98,6 +104,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
@@ -875,7 +882,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                         }
                                     }
                                 }
-                                GridScrollThumb(gridState, items.size, Modifier.align(Alignment.CenterEnd))
+                                GridScrollBar(gridState, items.size, gridRowPx, Modifier.align(Alignment.CenterEnd))
                             }
                         }
                     }
@@ -1061,16 +1068,21 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     }
 }
 
-/** 宫格右侧的滚动指示滑块（设计图：只有 thumb、没有整条轨道）：细长圆角小条贴右缘
- *  （半透明白），滚动时出现、位置/长度对应可视区域占比，滚动停止约 2 秒后淡出隐藏，
- *  再次滚动重现。纯指示器，不可拖拽。回收站宫格与回忆时光机宫格共用。 */
+/** 宫格右侧的可拖动滚动条（设计图：回收站滚动条.png，MIUI 相册同款）：15×46dp 深灰
+ *  (#4C4C4C) 胶囊贴右缘（右边距 13dp），内部上下两个 8×4dp 白色小三角。不滚动时隐藏，
+ *  滚动/拖动时出现，停止约 2 秒后淡出。药丸热区比视觉大（横向左扩 12dp、纵向上下各放宽
+ *  24dp），抓住上下拖即按比例直滚宫格（目标位置含行内偏移，全程连续无逐行跳动），拖动中
+ *  不淡出；未命中的触碰不消费、自然落回宫格，照片点选与普通滚动不受影响。仅回收站宫格
+ *  使用（回忆时光机不显示滚动条）。 */
 @Composable
-private fun GridScrollThumb(gridState: LazyGridState, totalItems: Int, modifier: Modifier = Modifier) {
+private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx: Int, modifier: Modifier = Modifier) {
     if (totalItems < 24) return
-    // 滚动即出现；停止 2 秒后淡出（淡出期间新滚动立即重现）。
+    val scope = rememberCoroutineScope()
+    // 滚动或拖动即出现；两者都停止 2 秒后淡出（淡出期间新滚动立即重现）。
     var shown by remember { mutableStateOf(false) }
-    LaunchedEffect(gridState.isScrollInProgress) {
-        if (gridState.isScrollInProgress) {
+    var dragging by remember { mutableStateOf(false) }
+    LaunchedEffect(gridState.isScrollInProgress, dragging) {
+        if (gridState.isScrollInProgress || dragging) {
             shown = true
         } else {
             delay(2000)
@@ -1080,9 +1092,13 @@ private fun GridScrollThumb(gridState: LazyGridState, totalItems: Int, modifier:
     val thumbAlpha by animateFloatAsState(
         targetValue = if (shown) 1f else 0f,
         animationSpec = tween(250),
-        label = "scrollThumbAlpha",
+        label = "scrollBarAlpha",
     )
     var areaHeightPx by remember { mutableIntStateOf(0) }
+    // 拖动中的药丸位置（px，相对轨道顶）：拖动开始时从当前比例快照，之后纯跟手——不能被
+    // layoutInfo 反写（拖动驱动宫格、宫格又改比例，互相追会抖）。
+    var dragOffsetPx by remember { mutableStateOf(0f) }
+    val dragJob = remember { mutableStateOf<Job?>(null) }
     // 每帧读取滚动位置只会重组这个小工具，宫格本身不受影响。
     val info = gridState.layoutInfo
     val total = info.totalItemsCount.coerceAtLeast(1)
@@ -1092,23 +1108,107 @@ private fun GridScrollThumb(gridState: LazyGridState, totalItems: Int, modifier:
     val denom = (total - span).coerceAtLeast(1)
     val frac = (first.toFloat() / denom).coerceIn(0f, 1f)
     val density = LocalDensity.current
-    val thumbHeightPx = maxOf(with(density) { 48.dp.toPx() }, areaHeightPx * (span.toFloat() / total))
+    val thumbHeightPx = with(density) { 46.dp.toPx() }
     val travelPx = (areaHeightPx - thumbHeightPx).coerceAtLeast(0f)
     Box(
         modifier
             .fillMaxHeight()
-            .width(9.dp)
-            .onSizeChanged { areaHeightPx = it.height },
+            .width(44.dp)
+            .onSizeChanged { areaHeightPx = it.height }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    // 命中区按下瞬间现场计算（pointerInput 不随重组重启，绝不能闭包组合期的
+                    // 派生值——全部从 gridState/areaHeightPx 现读）。
+                    val pillH = 46.dp.toPx()
+                    val travel = (areaHeightPx - pillH).coerceAtLeast(0f)
+                    val li = gridState.layoutInfo
+                    val vis = li.visibleItemsInfo
+                    val f0 = vis.firstOrNull()?.index ?: 0
+                    val l0 = vis.lastOrNull()?.index ?: f0
+                    val den = (li.totalItemsCount - (l0 - f0 + 1)).coerceAtLeast(1)
+                    val pillTop = ((f0.toFloat() / den).coerceIn(0f, 1f)) * travel
+                    val zoneLeft = size.width - (13.dp + 15.dp + 12.dp).toPx()
+                    val zoneTop = pillTop - 24.dp.toPx()
+                    val zoneBottom = pillTop + pillH + 24.dp.toPx()
+                    if (down.position.x < zoneLeft || down.position.y < zoneTop || down.position.y > zoneBottom) {
+                        return@awaitEachGesture
+                    }
+                    down.consume()
+                    dragging = true
+                    dragOffsetPx = pillTop
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (change.changedToUp()) {
+                                change.consume()
+                                break
+                            }
+                            val dy = change.positionChange().y
+                            if (dy != 0f) {
+                                val t = (areaHeightPx - pillH).coerceAtLeast(0f)
+                                val newOff = (dragOffsetPx + dy).coerceIn(0f, t)
+                                if (newOff != dragOffsetPx) {
+                                    dragOffsetPx = newOff
+                                    // 绝对映射：轨道比例 → 目标条目（含行内偏移）。
+                                    val l = gridState.layoutInfo
+                                    val v = l.visibleItemsInfo
+                                    val fi = v.firstOrNull()?.index ?: 0
+                                    val la = v.lastOrNull()?.index ?: fi
+                                    val d = (l.totalItemsCount - (la - fi + 1)).coerceAtLeast(1)
+                                    val pos = (if (t > 0f) newOff / t else 0f) * d
+                                    val idx = pos.toInt().coerceIn(0, d)
+                                    val inRow = ((pos - idx) * rowHeightPx).roundToInt()
+                                    dragJob.value?.cancel()
+                                    dragJob.value = scope.launch { gridState.scrollToItem(idx, inRow) }
+                                }
+                                change.consume()
+                            }
+                        }
+                    } finally {
+                        // 手势被取消（父级截获/多点冲突）也要复位，否则药丸永远不再淡出。
+                        dragging = false
+                    }
+                }
+            },
         contentAlignment = Alignment.TopEnd,
     ) {
         Box(
             Modifier
-                .offset { IntOffset(0, (frac * travelPx).roundToInt()) }
+                .offset { IntOffset(0, (if (dragging) dragOffsetPx else frac * travelPx).roundToInt()) }
                 .alpha(thumbAlpha)
-                .width(4.dp)
-                .height(with(density) { thumbHeightPx.toDp() })
-                .background(Color.White.copy(alpha = 0.45f), RoundedCornerShape(2.dp))
-        )
+                .padding(end = 13.dp)
+                .size(15.dp, 46.dp)
+                .background(Color(0xFF4C4C4C), RoundedCornerShape(50)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ScrollBarArrow(pointUp = true)
+                ScrollBarArrow(pointUp = false)
+            }
+        }
+    }
+}
+
+/** 滚动条药丸里的白色小三角（设计图：8×4dp、约 80% 白、上下两个、间距 8dp）。 */
+@Composable
+private fun ScrollBarArrow(pointUp: Boolean) {
+    Canvas(Modifier.size(8.dp, 4.dp)) {
+        val w = size.width
+        val h = size.height
+        val path = Path()
+        if (pointUp) {
+            path.moveTo(w / 2f, 0f)
+            path.lineTo(w, h)
+            path.lineTo(0f, h)
+        } else {
+            path.moveTo(0f, 0f)
+            path.lineTo(w, 0f)
+            path.lineTo(w / 2f, h)
+        }
+        path.close()
+        drawPath(path, Color.White.copy(alpha = 0.8f))
     }
 }
 
@@ -1888,7 +1988,7 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
         onDispose { previous?.let { prev -> controller?.isAppearanceLightStatusBars = prev } }
     }
     val gridState = rememberLazyGridState()
-    // 视口居中的固定窗口预载（同回收站）：甩动/滚动条拖拽经过的中间位置不进队列。
+    // 视口居中的固定窗口预载（同回收站）：甩动经过的中间位置不进队列。
     GridWindowedThumbnailPreload(gridState, photos, gridThumbSize)
     // 每次打开重 key 整个共享转场布局：新 scope 让所有 shared element 的 currentBounds
     // 清零，打开帧宫格 measure 时刷新到当前位置（同回收站）。
@@ -1973,8 +2073,6 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                         }
                                     }
                                 }
-                                // 滚动指示滑块（同回收站：滚动出现、停 2 秒淡出）。
-                                GridScrollThumb(gridState, photos.size, Modifier.align(Alignment.CenterEnd))
                             }
                         }
                     }
