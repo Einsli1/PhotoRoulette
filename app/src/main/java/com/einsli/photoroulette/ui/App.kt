@@ -26,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
@@ -455,6 +456,10 @@ private fun PageContent(
  *  已选中=实心蓝底 + 白色对勾（设计图用 MIUI 蓝）。 */
 private val TrashSelectionBlue = Color(0xFF3478F6)
 
+/** 宫格缝隙（设计图实测：1200px 全分辨率下缝宽 4px、列宽 297px、屏幕两缘齐边无缝隙，
+ *  横向纵向同宽）→ 4px / 3x 密度 = 1.33dp。回收站与回忆时光机宫格共用。 */
+private val GridGap = (4f / 3f).dp
+
 @Composable
 private fun TrashSelectionBadge(checked: Boolean, modifier: Modifier = Modifier) {
     Box(
@@ -719,19 +724,23 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
         controller?.isAppearanceLightStatusBars = false
         onDispose { previous?.let { prev -> controller?.isAppearanceLightStatusBars = prev } }
     }
-    // Cell-sized decode target for grid thumbnails: 4 columns, so ~screenWidth/4 px. Fixing the
-    // request size keeps every cell's memory-cache entry identical and small, so fast scrolling
-    // re-shows already-loaded photos instantly instead of re-decoding.
+    // Cell-sized decode target for grid thumbnails: 4 columns with GridGap seams, so
+    // ~(screenWidth - 3 gaps)/4 px. Fixing the request size keeps every cell's memory-cache
+    // entry identical and small, so fast scrolling re-shows already-loaded photos instantly
+    // instead of re-decoding.
     val gridCellPx = with(LocalDensity.current) {
-        (LocalConfiguration.current.screenWidthDp.dp.toPx() / 4f).roundToInt()
+        ((LocalConfiguration.current.screenWidthDp.dp - GridGap * 3).toPx() / 4f).roundToInt()
     }
     // 缩略图解码尺寸 = 显示像素的 70%：解码快 ~2 倍、单张内存省一半，
     // 配合扩容后的内存缓存（见 PhotoRouletteApp），窗口内载过的缩略图滑回来直接命中。
     val thumbPx = remember(gridCellPx) { (gridCellPx * 0.7f).roundToInt() }
     val gridThumbSize = remember(thumbPx) { CoilSize(thumbPx, thumbPx) }
-    // One grid row = cell（4 列密铺零间距，无额外行距）; approximates the scroll offset from the
+    // One grid row = cell + 缝隙（1.33dp 密铺细缝）; approximates the scroll offset from the
     // first visible item's index, used by the spring pull's limit detection.
-    val gridRowPx = gridCellPx
+    val trashDensity = LocalDensity.current
+    val gridRowPx = remember(gridCellPx, trashDensity) {
+        gridCellPx + with(trashDensity) { GridGap.toPx() }.roundToInt()
+    }
     // 视口居中的固定窗口预载：只在滚动稳定停止后铺「可见区 ± 30 张」，快速甩动与滚动条
     // 拖拽经过的中间位置完全不进队列（详见 [GridWindowedThumbnailPreload]）。
     GridWindowedThumbnailPreload(gridState, items, gridThumbSize)
@@ -791,6 +800,8 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                     state = gridState,
                                     columns = GridCells.Fixed(4),
                                     modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(GridGap),
+                                    verticalArrangement = Arrangement.spacedBy(GridGap),
                                     contentPadding = PaddingValues(top = gridTopPad, bottom = gridBottomPad),
                                     flingBehavior = rememberGentleFlingBehavior()
                                 ) {
@@ -864,23 +875,25 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                         }
                                     }
                                 }
-                                TrashScrollbar(gridState, items.size, Modifier.align(Alignment.CenterEnd))
+                                GridScrollThumb(gridState, items.size, Modifier.align(Alignment.CenterEnd))
                             }
                         }
                     }
                     // ── 悬浮头部：普通模式 = 返回‹ + 「回收站/总容量」 + 垃圾桶(进选择模式)；
-                    //    选择模式 = X(退出) + 「已选择N项」 + 全选。渐变底让白字在任何照片上可读，
-                    //    且吸收落在头部空白处的触碰（不误开下面的照片）。
+                    //    选择模式 = X(退出) + 「已选择N项」 + 全选。渐变底按设计图（回收站中间.jpg）
+                    //    加高加浓：顶部最深、向下长距离淡出——照片从头下穿过时有清晰的压暗层次，
+                    //    白字始终可读。且吸收落在头部空白处的触碰（不误开下面的照片）。
                     Box(
                         Modifier
                             .fillMaxWidth()
                             .background(
                                 Brush.verticalGradient(
-                                    0f to Color.Black.copy(alpha = 0.8f),
+                                    0f to Color.Black.copy(alpha = 0.9f),
+                                    0.45f to Color.Black.copy(alpha = 0.6f),
                                     1f to Color.Transparent,
                                 )
                             )
-                            .padding(bottom = 24.dp)
+                            .padding(bottom = 56.dp)
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {
                                     while (true) { awaitPointerEvent().changes.forEach { it.consume() } }
@@ -1048,14 +1061,28 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
     }
 }
 
-/** 回收站宫格右侧的快速滚动条：细轨道 + 可拖拽圆头拇指，拖动直接跳转到对应位置。 */
+/** 宫格右侧的滚动指示滑块（设计图：只有 thumb、没有整条轨道）：细长圆角小条贴右缘
+ *  （半透明白），滚动时出现、位置/长度对应可视区域占比，滚动停止约 2 秒后淡出隐藏，
+ *  再次滚动重现。纯指示器，不可拖拽。回收站宫格与回忆时光机宫格共用。 */
 @Composable
-private fun TrashScrollbar(gridState: LazyGridState, totalItems: Int, modifier: Modifier = Modifier) {
+private fun GridScrollThumb(gridState: LazyGridState, totalItems: Int, modifier: Modifier = Modifier) {
     if (totalItems < 24) return
-    val dc = designColors()
-    val scope = rememberCoroutineScope()
-    var dragging by remember { mutableStateOf(false) }
-    var trackHeightPx by remember { mutableIntStateOf(0) }
+    // 滚动即出现；停止 2 秒后淡出（淡出期间新滚动立即重现）。
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(gridState.isScrollInProgress) {
+        if (gridState.isScrollInProgress) {
+            shown = true
+        } else {
+            delay(2000)
+            shown = false
+        }
+    }
+    val thumbAlpha by animateFloatAsState(
+        targetValue = if (shown) 1f else 0f,
+        animationSpec = tween(250),
+        label = "scrollThumbAlpha",
+    )
+    var areaHeightPx by remember { mutableIntStateOf(0) }
     // 每帧读取滚动位置只会重组这个小工具，宫格本身不受影响。
     val info = gridState.layoutInfo
     val total = info.totalItemsCount.coerceAtLeast(1)
@@ -1065,47 +1092,22 @@ private fun TrashScrollbar(gridState: LazyGridState, totalItems: Int, modifier: 
     val denom = (total - span).coerceAtLeast(1)
     val frac = (first.toFloat() / denom).coerceIn(0f, 1f)
     val density = LocalDensity.current
-    val thumbHeightPx = maxOf(with(density) { 48.dp.toPx() }, trackHeightPx * (span.toFloat() / total))
-    val travelPx = (trackHeightPx - thumbHeightPx).coerceAtLeast(0f)
-    val thumbHeightDp = with(density) { thumbHeightPx.toDp() }
-    fun scrollToFraction(f: Float) {
-        val target = (f.coerceIn(0f, 1f) * denom).roundToInt().coerceIn(0, total - 1)
-        scope.launch { gridState.scrollToItem(target) }
-    }
+    val thumbHeightPx = maxOf(with(density) { 48.dp.toPx() }, areaHeightPx * (span.toFloat() / total))
+    val travelPx = (areaHeightPx - thumbHeightPx).coerceAtLeast(0f)
     Box(
         modifier
-            .width(26.dp)
             .fillMaxHeight()
-            .onSizeChanged { trackHeightPx = it.height }
-            .pointerInput(total) {
-                detectVerticalDragGestures(
-                    onDragStart = {
-                        dragging = true
-                        scrollToFraction(it.y / trackHeightPx.coerceAtLeast(1))
-                    },
-                    onDragEnd = { dragging = false },
-                    onDragCancel = { dragging = false },
-                    onVerticalDrag = { change, _ ->
-                        change.consume()
-                        scrollToFraction(change.position.y / trackHeightPx.coerceAtLeast(1))
-                    },
-                )
-            },
+            .width(9.dp)
+            .onSizeChanged { areaHeightPx = it.height },
+        contentAlignment = Alignment.TopEnd,
     ) {
         Box(
             Modifier
-                .align(Alignment.CenterEnd)
-                .width(4.dp)
-                .fillMaxHeight(0.92f)
-                .background(dc.track.copy(alpha = 0.5f), CircleShape)
-        )
-        Box(
-            Modifier
-                .align(Alignment.TopEnd)
                 .offset { IntOffset(0, (frac * travelPx).roundToInt()) }
-                .width(5.dp)
-                .height(thumbHeightDp)
-                .background(if (dragging) dc.accent else dc.accent.copy(alpha = 0.55f), CircleShape)
+                .alpha(thumbAlpha)
+                .width(4.dp)
+                .height(with(density) { thumbHeightPx.toDp() })
+                .background(Color.White.copy(alpha = 0.45f), RoundedCornerShape(2.dp))
         )
     }
 }
@@ -1863,16 +1865,28 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
     var previewSettled by remember { mutableStateOf(false) }
     // Cell-sized decode target for the 4-column memory grid (same trick as RecycleBin).
     val gridCellPx = with(LocalDensity.current) {
-        (LocalConfiguration.current.screenWidthDp.dp.toPx() / 4f).roundToInt()
+        ((LocalConfiguration.current.screenWidthDp.dp - GridGap * 3).toPx() / 4f).roundToInt()
     }
     val gridThumbSize = remember(gridCellPx) { CoilSize(gridCellPx, gridCellPx) }
-    // One grid row = cell（4 列密铺零间距，与回收站宫格同排版）; approximates the scroll offset
-    // from the first visible item's index, used by the spring pull's limit detection.
-    val gridRowPx = gridCellPx
+    // One grid row = cell + 缝隙（与回收站宫格同排版，GridGap 细缝）; approximates the scroll
+    // offset from the first visible item's index, used by the spring pull's limit detection.
+    val memoryDensity = LocalDensity.current
+    val gridRowPx = remember(gridCellPx, memoryDensity) {
+        gridCellPx + with(memoryDensity) { GridGap.toPx() }.roundToInt()
+    }
     val scope = rememberCoroutineScope()
     // System back (including the edge-swipe gesture) returns to the home screen. While the
     // preview is open, SharedPhotoPreview's own BackHandler (composed later) closes it first.
     BackHandler(onBack = onBack)
+    // 头部悬浮+顶部渐变后内容延伸到状态栏之下：状态栏图标强制白色（同回收站），离开页面恢复。
+    val memoryActivity = LocalContext.current as? android.app.Activity
+    DisposableEffect(memoryActivity) {
+        val window = memoryActivity?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        val previous = controller?.isAppearanceLightStatusBars
+        controller?.isAppearanceLightStatusBars = false
+        onDispose { previous?.let { prev -> controller?.isAppearanceLightStatusBars = prev } }
+    }
     val gridState = rememberLazyGridState()
     // 视口居中的固定窗口预载（同回收站）：甩动/滚动条拖拽经过的中间位置不进队列。
     GridWindowedThumbnailPreload(gridState, photos, gridThumbSize)
@@ -1892,51 +1906,41 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                 exit = ExitTransition.None,
             ) {
                 val statusBarTop = rememberStatusBarTop()
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .padding(top = statusBarTop)
-                        .navigationBarsPadding()
-                        .padding(horizontal = 20.dp)
-                ) {
-                        Spacer(Modifier.height(10.dp))
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = onBack) { Icon(Icons.Default.Close, "返回") }
-                            Column(Modifier.weight(1f)) {
-                                Text("回忆时光机", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = dc.ink)
-                                if (memory != null) {
-                                    Text("${memory.yearsAgo}年前的今天 · ${memory.dateText} · ${memory.count} 张照片", fontSize = 12.sp, color = dc.slate)
-                                }
-                            }
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        // Only the grid is elastic: the header stays fixed, so the pull (drag past
-                        // the edge or the fling-limit spring) moves just the photos. clipToBounds
-                        // keeps the sliding grid from covering the header above it.
-                        SpringPullBox(
-                            modifier = Modifier.weight(1f).fillMaxWidth().clipToBounds(),
-                            pullAtTop = { (gridState.firstVisibleItemIndex * gridRowPx + gridState.firstVisibleItemScrollOffset).toFloat().coerceAtLeast(0f) },
-                            pullAtBottom = {
-                                val info = gridState.layoutInfo
-                                val last = info.visibleItemsInfo.lastOrNull()
-                                if (last == null || last.index < info.totalItemsCount - 1) {
-                                    // More content below the viewport: still scrollable, no bottom pull.
-                                    Float.MAX_VALUE
-                                } else {
-                                    val contentEnd = (last.offset.y + last.size.height + info.afterContentPadding).toFloat()
-                                    (contentEnd - info.viewportEndOffset.toFloat()).coerceAtLeast(0f)
-                                }
-                            },
-                        ) {
-                            if (photos.isEmpty()) {
-                                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                                    Text("暂无回忆", color = dc.slate)
-                                }
+                // 宫格铺满全屏（同回收站）：顶到状态栏、内容从悬浮头部下方穿过；SpringPull
+                // 弹性语义与 clipToBounds（坑 17）保持原样，只换了外层布局。
+                Box(Modifier.fillMaxSize()) {
+                    val gridTopPad = statusBarTop + 56.dp
+                    val gridBottomPad = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp
+                    SpringPullBox(
+                        modifier = Modifier.fillMaxSize().clipToBounds(),
+                        pullAtTop = { (gridState.firstVisibleItemIndex * gridRowPx + gridState.firstVisibleItemScrollOffset).toFloat().coerceAtLeast(0f) },
+                        pullAtBottom = {
+                            val info = gridState.layoutInfo
+                            val last = info.visibleItemsInfo.lastOrNull()
+                            if (last == null || last.index < info.totalItemsCount - 1) {
+                                // More content below the viewport: still scrollable, no bottom pull.
+                                Float.MAX_VALUE
                             } else {
+                                val contentEnd = (last.offset.y + last.size.height + info.afterContentPadding).toFloat()
+                                (contentEnd - info.viewportEndOffset.toFloat()).coerceAtLeast(0f)
+                            }
+                        },
+                    ) {
+                        if (photos.isEmpty()) {
+                            Column(
+                                Modifier.fillMaxSize().padding(top = gridTopPad),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center,
+                            ) { Text("暂无回忆", color = dc.slate) }
+                        } else {
+                            Box(Modifier.fillMaxSize()) {
                                 LazyVerticalGrid(
                                     state = gridState,
                                     columns = GridCells.Fixed(4),
                                     modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(GridGap),
+                                    verticalArrangement = Arrangement.spacedBy(GridGap),
+                                    contentPadding = PaddingValues(top = gridTopPad, bottom = gridBottomPad),
                                     flingBehavior = rememberGentleFlingBehavior()
                                 ) {
                                     itemsIndexed(photos) { index, photo ->
@@ -1969,9 +1973,47 @@ private fun MemoryViewer(memory: MemoryInfo?, onBack: () -> Unit) {
                                         }
                                     }
                                 }
+                                // 滚动指示滑块（同回收站：滚动出现、停 2 秒淡出）。
+                                GridScrollThumb(gridState, photos.size, Modifier.align(Alignment.CenterEnd))
                             }
                         }
                     }
+                    // ── 悬浮头部（同回收站）：关闭 X + 标题/副标题改白字浮在宫格上层，
+                    //    顶部渐变阴影让穿过的照片有压暗层次、白字始终可读；头部空白吸收触碰。
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.verticalGradient(
+                                    0f to Color.Black.copy(alpha = 0.9f),
+                                    0.45f to Color.Black.copy(alpha = 0.6f),
+                                    1f to Color.Transparent,
+                                )
+                            )
+                            .padding(bottom = 48.dp)
+                            .pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) { awaitPointerEvent().changes.forEach { it.consume() } }
+                                }
+                            },
+                    ) {
+                        Column(Modifier.padding(top = statusBarTop)) {
+                            Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = onBack) { Icon(Icons.Default.Close, "返回", tint = Color.White) }
+                                Column(Modifier.weight(1f)) {
+                                    Text("回忆时光机", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    if (memory != null) {
+                                        Text(
+                                            "${memory.yearsAgo}年前的今天 · ${memory.dateText} · ${memory.count} 张照片",
+                                            fontSize = 12.sp,
+                                            color = Color.White.copy(alpha = 0.75f),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             // ── 预览层：overlay（同回收站：AnimatedVisibility 单一常驻实例；visible 用
             //    previewVisible 晚一帧显示让宫格先 measure；关闭时 previewSession 不变，
