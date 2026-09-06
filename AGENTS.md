@@ -94,7 +94,7 @@ ui = combine(settings, session, counts, homeStats, weekStats) { ... }
 ## 9. 真机验证技巧
 
 - 设备：Redmi（serial `794ddcf1`），1200×2608 @ density 3.0（400dp 宽）。**adb input 注入已可用**（2026-09-06 用户在手机开启「USB 调试（安全设置）」后实测 keyevent/tap 均生效），可以直接 `adb shell input tap/swipe/keyevent` 做交互验证；若哪天又被拦（报 injection 安全错误），先让用户检查该开关
-- 截图：`cmd /c "adb exec-out screencap -p > file.png"`（PowerShell `>` 会损坏二进制）
+- 截图：`adb exec-out screencap -p > 文件`（Git Bash 的 `>` 不损坏二进制；PowerShell `>` 会坏）。**截图统一存工程目录 `debug_shots/`**（`*.png` 已被 .gitignore 忽略），别写系统 Temp；废弃截图随手清理
 - 读文字：Windows.Media.Ocr（zh-Hans-CN），把截图区域放大后再 OCR 更准
 
 ## 10. 已踩过的坑（务必记住）
