@@ -431,6 +431,12 @@ fun SharedTransitionScope.SharedPhotoPreview(
     val scrimAlpha = 1f - revealProgress
     // 单击照片隐藏/显示标题与按钮（仅照片，非视频；视频点击仍是播放/暂停）。
     var chromeHidden by remember { mutableStateOf(false) }
+    // 视频静态帧飞行：打开飞行期间与关闭起飞前，视频页用宫格同款 1s 静态帧参与 shared
+    // element（同 cache key、同 Crop↔Fit morph，机制与图片完全同源），飞行落定后才挂载
+    // 播放器；关闭时在 requestClose（起飞前）先把播放器换回静态帧——VideoView 未 prepared
+    // 的 surface 是纯黑、播放中内容也与宫格缩略图不同源，直接参与飞行会黑块/跳变。
+    // 图片路径不受影响；整理页不用本组件的视频分支（无 shared element）。
+    var videoStaticFlight by remember { mutableStateOf(true) }
     // 打开预览时：标题/按钮先隐藏，等 overlay 淡入结束后再淡入——出现即固定为
     // 「按钮浮在照片上层」，不会在过渡期间与照片互相盖压（bug 3）。
     var chromeRevealed by remember { mutableStateOf(false) }
@@ -444,9 +450,11 @@ fun SharedTransitionScope.SharedPhotoPreview(
             closePending = false
             chromeHidden = false
             chromeRevealed = false
+            videoStaticFlight = true // 打开飞行用静态帧起跑，落定后再挂播放器
             zoomResetTick++ // 强制当前照片缩回 1x（新打开的照片从 1x 起步）
             pagerState.scrollToPage(initialIndex.coerceIn(0, (openPhotos.size - 1).coerceAtLeast(0)))
             delay(PhotoTransitionMillis + 30L)
+            videoStaticFlight = false // 飞行结束：挂载播放器（静态帧继续盖到 prepared）
             chromeRevealed = true
         }
     }
@@ -479,6 +487,9 @@ fun SharedTransitionScope.SharedPhotoPreview(
     fun requestClose() {
         if (closePending) return
         closePending = true
+        // 关闭起飞前先把播放器摘下、换回宫格同款静态帧：返回飞行的画面与宫格 cell 同源，
+        // 也顺带停掉播放（VideoView 在换帧的同一帧被移出组合并 stopPlayback）。
+        videoStaticFlight = true
         // 先让调用方重排 cell 的 sharedKey(当前 cell 顶上 base key),必须发生在
         // zoomReset → onClose → visible 翻转之前,配对才落到当前 cell 上。
         onCloseStarted(currentPhoto.mediaId)
@@ -578,6 +589,11 @@ fun SharedTransitionScope.SharedPhotoPreview(
                         resetTick = zoomResetTick,
                         onResetDone = { if (closePending) onClose(currentPhoto, swipeOut) },
                         placeholderRequest = placeholder,
+                        // 飞行期（打开/关闭）用宫格同款静态帧参与转场，落定后挂播放器；
+                        // 播放器挂载后静态帧继续盖到 prepared（无缝交棒，不闪黑）。
+                        staticFrame = videoStaticFlight,
+                        coverWithFrame = true,
+                        cropFitProgress = contentMorph.value,
                         bottomInset = videoBarBottomInset,
                         chromeProgress = chromeProgress,
                         chromeExitPx = chromeExitPx,

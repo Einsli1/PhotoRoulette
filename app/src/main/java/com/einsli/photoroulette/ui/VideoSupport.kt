@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -165,6 +166,21 @@ fun VideoPhoto(
     resetTick: Int = 0,
     onResetDone: () -> Unit = {},
     placeholderRequest: ImageRequest? = null,
+    /**
+     * true = shared element 飞行期（打开 / 关闭起飞前）：不挂载播放器，只渲染宫格同款静态帧
+     * （带 Crop↔Fit morph）。VideoView 未 prepared 的 surface 是纯黑、内容也与宫格缩略图
+     * 不同源，直接参与飞行会从黑块起飞/落地跳变；飞行落定后调用方翻回 false 再挂播放器。
+     * 整理页（默认 false）行为不变。
+     */
+    staticFrame: Boolean = false,
+    /**
+     * 播放器已挂载时用静态帧盖在上面、直到 prepared 才淡出（无缝交棒：避免 VideoView
+     * 未 prepared 的纯黑 surface 盖掉静态帧闪一下黑）。staticFrame=true 时无需此参数。
+     */
+    coverWithFrame: Boolean = false,
+    /** 静态帧的 Crop↔Fit morph（同 ZoomablePhoto.cropFitProgress）：0=Crop（飞行起点=
+     *  宫格观感）、1=Fit（静止态）。由 SharedPhotoPreview 的 contentMorph 驱动。 */
+    cropFitProgress: Float = 1f,
     /** 控制条离屏幕底部的悬浮高度（全屏模式下=底部按钮行高+间距；0=贴底）。 */
     bottomInset: Dp = 0.dp,
     /** 0=显示，1=隐藏（与标题/按钮的 chromeProgress 同步）。 */
@@ -187,6 +203,12 @@ fun VideoPhoto(
     val thumbRequest = remember(photo.uri, previewSize) {
         ImageRequest.Builder(context).data(photo.uri).size(previewSize).videoFrameMillis(1000).build()
     }
+    // Crop↔Fit 缩放比（方形宫格，仅静态帧生效）：把 Fit 帧额外放大 cropRatio 倍即等于
+    // Crop。aspect 来自解码缓存（宫格缩略图解码时已写入，视频=1s 帧的宽高比），取不到
+    // 则退化为 1（纯 Fit，无 morph）。
+    val aspect = remember(photo.mediaId) { PhotoAspectCache.get(photo.mediaId) }
+    val cropRatio = aspect?.let { cropToFitRatio(it) } ?: 1f
+    val cropFitScale = 1f + (cropRatio - 1f) * (1f - cropFitProgress)
 
     LaunchedEffect(photo.mediaId, videoView) {
         val vv = videoView ?: return@LaunchedEffect
@@ -232,8 +254,9 @@ fun VideoPhoto(
         }
     }
 
-    // Closing the preview (or the pager page leaving composition) stops playback immediately.
-    DisposableEffect(photo.mediaId) {
+    // Closing the preview, swapping back to the static flight frame (player unmounts), or the
+    // pager page leaving composition stops playback immediately.
+    DisposableEffect(photo.mediaId, staticFrame) {
         onDispose {
             runCatching { videoView?.stopPlayback() }
         }
@@ -247,34 +270,54 @@ fun VideoPhoto(
         }
     }
 
-    Box(modifier.fillMaxSize().background(Color.Black)) {
-        // Cached source thumbnail (the cell/card's bitmap): instant on the first open, covers
-        // the decode gap of the sharper frame below.
-        if (placeholderRequest != null) {
-            Image(
-                painter = rememberAsyncImagePainter(placeholderRequest),
-                contentDescription = null,
+    Box(modifier.fillMaxSize().background(Color.Black).clipToBounds()) {
+        // 播放器：飞行期（staticFrame）不挂载，落定后才有——静态帧与它无缝交棒。
+        if (!staticFrame) {
+            AndroidView(
+                factory = { ctx -> VideoView(ctx).apply { videoView = this } },
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+        // 静态帧（宫格同款 1s 帧，同 cache key）：staticFrame（飞行期）或 coverWithFrame
+        // （播放器已挂但未 prepared）时盖在播放器上层。旧实现把它们垫在 VideoView 下面——
+        // VideoView 未 prepared 的 surface 是纯黑，等于永远看不见，飞行因此是一块黑。
+        // prepared 后一起淡出露出真正的视频（180ms 交叉淡化）；staticFrame 时 prepared 恒
+        // 为 false，常显。morph 与 ZoomablePhoto 的 cropFitProgress 同一套机制：0=Crop
+        // （飞行起点与宫格 cell 观感一致）、1=Fit。
+        if (staticFrame || coverWithFrame) {
+            if (placeholderRequest != null) {
+                val placeholderAlpha by animateFloatAsState(
+                    targetValue = if (prepared) 0f else 1f,
+                    animationSpec = tween(180),
+                    label = "videoPlaceholderAlpha",
+                )
+                Image(
+                    painter = rememberAsyncImagePainter(placeholderRequest),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { scaleX = cropFitScale; scaleY = cropFitScale }
+                        .alpha(placeholderAlpha),
+                    contentScale = ContentScale.Fit,
+                )
+            }
+            // Sharper frame shown while the video prepares; fades in once decoded.
+            var thumbReady by remember(photo.mediaId, thumbRequest) { mutableStateOf(false) }
+            val thumbAlpha by animateFloatAsState(
+                targetValue = if (thumbReady && !prepared) 1f else 0f,
+                animationSpec = tween(180),
+                label = "videoThumbAlpha",
+            )
+            Image(
+                painter = rememberAsyncImagePainter(thumbRequest, onSuccess = { thumbReady = true }),
+                contentDescription = photo.displayName,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { scaleX = cropFitScale; scaleY = cropFitScale }
+                    .alpha(thumbAlpha),
                 contentScale = ContentScale.Fit,
             )
         }
-        // Sharper frame shown while the video prepares; fades in once decoded.
-        var thumbReady by remember(photo.mediaId, thumbRequest) { mutableStateOf(false) }
-        val thumbAlpha by animateFloatAsState(
-            targetValue = if (thumbReady && !prepared) 1f else 0f,
-            animationSpec = tween(180),
-            label = "videoThumbAlpha",
-        )
-        Image(
-            painter = rememberAsyncImagePainter(thumbRequest, onSuccess = { thumbReady = true }),
-            contentDescription = photo.displayName,
-            modifier = Modifier.fillMaxSize().alpha(thumbAlpha),
-            contentScale = ContentScale.Fit,
-        )
-        AndroidView(
-            factory = { ctx -> VideoView(ctx).apply { videoView = this } },
-            modifier = Modifier.fillMaxSize(),
-        )
         // Tap layer: 全屏模式下隐藏/显示 chrome（与图片一致）；整理页预览保持播放/暂停。
         // Taps only — vertical drags still reach the swipe-down-to-close gesture and horizontal
         // drags reach the pager.
@@ -300,7 +343,7 @@ fun VideoPhoto(
                     })
                 }
         )
-        if (prepared) {
+        if (prepared && !staticFrame) {
             Row(
                 Modifier
                     .align(Alignment.BottomCenter)
