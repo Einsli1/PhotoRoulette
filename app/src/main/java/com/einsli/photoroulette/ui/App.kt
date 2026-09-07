@@ -855,6 +855,7 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                             SharedGridImage(
                                                 photo, 0.dp, Modifier.fillMaxSize(),
                                                 gridSize = gridThumbSize,
+                                                sharedKey = cellSharedKey,
                                                 // 只有正在飞回的那张 cell 订阅转场状态并渲染全屏 Fit 拷贝。
                                                 fitOnEnter = photo.mediaId == flyingMediaId,
                                                 // 预览打开期间 cell 退出「目标态」竞争：飞行目标只能有一个。
