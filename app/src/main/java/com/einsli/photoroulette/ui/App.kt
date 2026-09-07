@@ -882,7 +882,9 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                         }
                                     }
                                 }
-                                GridScrollBar(gridState, items.size, gridRowPx, Modifier.align(Alignment.CenterEnd))
+                                // 选择模式传 interactive=false：滚动条淡出为纯视觉，右缘让给
+                                // 每格右下角的圆形选择圈（药丸热区与圆圈完全重叠，会整颗吞掉点击）。
+                                GridScrollBar(gridState, items.size, gridRowPx, interactive = !selecting, modifier = Modifier.align(Alignment.CenterEnd))
                             }
                         }
                     }
@@ -1073,14 +1075,21 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
  *  滚动/拖动时出现，停止约 2 秒后淡出。药丸热区比视觉大（横向左扩 12dp、纵向上下各放宽
  *  24dp），抓住上下拖即按比例直滚宫格（目标位置含行内偏移，全程连续无逐行跳动），拖动中
  *  不淡出；未命中的触碰不消费、自然落回宫格，照片点选与普通滚动不受影响。仅回收站宫格
- *  使用（回忆时光机不显示滚动条）。 */
+ *  使用（回忆时光机不显示滚动条）。
+ *
+ *  热区只在滚动条真正可见时开启：淡出后 pointerInput 一律放行——否则这条满高透明层会
+ *  按药丸的「隐形」比例位置继续吞掉右缘触碰（选择模式最右列的圆圈点不了就是它）。
+ *  [interactive]=false（选择模式）时整条只做视觉、完全不拦截：圆圈和药丸同在右缘，
+ *  热区会整颗盖住圆圈的点击。 */
 @Composable
-private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx: Int, modifier: Modifier = Modifier) {
+private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx: Int, interactive: Boolean = true, modifier: Modifier = Modifier) {
     if (totalItems < 24) return
     val scope = rememberCoroutineScope()
     // 滚动或拖动即出现；两者都停止 2 秒后淡出（淡出期间新滚动立即重现）。
     var shown by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
+    // pointerInput(Unit) 不随重组重启，参数要经 rememberUpdatedState 才能被手势现场读到。
+    val liveInteractive by rememberUpdatedState(interactive)
     LaunchedEffect(gridState.isScrollInProgress, dragging) {
         if (gridState.isScrollInProgress || dragging) {
             shown = true
@@ -1118,8 +1127,11 @@ private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    // 命中区按下瞬间现场计算（pointerInput 不随重组重启，绝不能闭包组合期的
-                    // 派生值——全部从 gridState/areaHeightPx 现读）。
+                    // 按下瞬间先放行不需要滚动条的人（读的是现场值）：选择模式下整条不拦截，
+                    // 淡出后（shown=false 且未在拖动）热区也关闭——视觉上不存在的药丸没有
+                    // 资格吃掉右缘的触碰。命中区按下瞬间再现场计算（pointerInput 不随重组
+                    // 重启，绝不能闭包组合期的派生值——全部从 gridState/areaHeightPx 现读）。
+                    if (!liveInteractive || (!shown && !dragging)) return@awaitEachGesture
                     val pillH = 46.dp.toPx()
                     val travel = (areaHeightPx - pillH).coerceAtLeast(0f)
                     val li = gridState.layoutInfo
