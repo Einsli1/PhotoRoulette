@@ -346,7 +346,10 @@ fun SharedTransitionScope.SharedPhotoPreview(
     active: Boolean = true,
     bottomControls: (@Composable (current: PhotoEntity) -> Unit)? = null,
     sourceThumbSize: CoilSize? = null,
-    /** 照片铺满整块屏幕（含系统栏之下），标题和按钮浮在照片上层（回收站/回忆时光机）。 */
+    /** 照片铺满整块屏幕（含系统栏之下），标题和按钮浮在照片上层（回收站/回忆时光机）。
+     *  标题/按钮/顶部渐变经 [renderInSharedTransitionScopeOverlay] 以更高 zIndex 提升进
+     *  shared-transition overlay（见 [chromeInOverlay]），保证照片无论滞留在 overlay 还是
+     *  落回原位，chrome 都恒在其上——不再依赖宫格 cell 换哑 key(previewSettled) 的时序。 */
     fullScreenPhotoArea: Boolean = false,
     /** 单击照片（仅照片，非视频）隐藏/显示标题和按钮。 */
     tapToToggleChrome: Boolean = false,
@@ -492,6 +495,17 @@ fun SharedTransitionScope.SharedPhotoPreview(
             (WindowInsets.navigationBars.getBottom(density) + aboveBottom.toPx()).toDp()
         }
     } else 0.dp
+
+    // ── 全屏 chrome（顶部渐变 + 标题行 + 底部按钮）的渲染层（修「标题/按钮被照片盖住」）──
+    // 照片参与 shared element 时由 SharedTransitionLayout 的 overlay 绘制，而 overlay 永远
+    // 盖在本预览所有普通内容（标题/按钮）之上。照片何时退出 overlay 取决于宫格 cell 换哑 key
+    // (previewSettled) 与转场时序的竞争：一旦照片滞留 overlay，chrome 就被压到照片下方
+    // （Fit 黑边透明，标题/按钮从黑边里透出来）。把 chrome 用更高 zIndex 提升进同一 overlay
+    // (renderInSharedTransitionScopeOverlay)，无论照片落在哪一层，chrome 都恒在其上，
+    // 不再依赖换 key 的时序。返回飞行/下滑退出（closePending/swipeOut）时退回普通层，
+    // 随预览一起淡出、被返程照片盖过（与原观感一致）。
+    val chromeInOverlay: () -> Boolean =
+        { fullScreenPhotoArea && active && !closePending && !swipeOut }
 
     fun requestClose() {
         if (closePending) return
@@ -675,8 +689,13 @@ fun SharedTransitionScope.SharedPhotoPreview(
             // 跟随 chrome 显隐通路：出现时随 chromeRevealAlpha 淡入、隐藏/拖拽/关闭时随
             // chromeProgress 与标题一起飞出；只存在于全屏预览分支（整理页不加渐变底，坑 21）。
             // 画在照片之上、标题行之下；无 pointer 输入，不挡手势（预览根部已有吸收层）。
+            // zIndex 1f：高于照片(0f)、低于 chrome(2f)，即使照片滞留 overlay 也在其上。
             Box(
                 Modifier
+                    .renderInSharedTransitionScopeOverlay(
+                        renderInOverlay = chromeInOverlay,
+                        zIndexInOverlay = 1f,
+                    )
                     .fillMaxWidth()
                     .height(statusBarTop + 72.dp)
                     // graphicsLayer 必须在 background 之前:background 画在它所在位置,
@@ -694,6 +713,12 @@ fun SharedTransitionScope.SharedPhotoPreview(
             )
             Column(
                 Modifier
+                    // zIndex 2f（高于照片 0f 与顶部渐变 1f）：chrome 恒浮在照片上层，
+                    // 即使照片因 settle 竞态滞留在 shared-transition overlay 里。
+                    .renderInSharedTransitionScopeOverlay(
+                        renderInOverlay = chromeInOverlay,
+                        zIndexInOverlay = 2f,
+                    )
                     .fillMaxSize()
                     .padding(top = statusBarTop)
                     .navigationBarsPadding()
