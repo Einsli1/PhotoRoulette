@@ -883,7 +883,9 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
                                         }
                                     }
                                 }
-                                GridScrollBar(gridState, items.size, gridRowPx, Modifier.align(Alignment.CenterEnd))
+                                // 选择模式 interactive=false：滚动条滚动手势不挂载，右缘让给
+                                // 每格右下角的圆形选择圈（透明条挂着手势层会挡住整列命中）。
+                                GridScrollBar(gridState, items.size, gridRowPx, interactive = !selecting, modifier = Modifier.align(Alignment.CenterEnd))
                             }
                         }
                     }
@@ -1073,10 +1075,13 @@ private fun revealGridItemIfOffscreen(state: LazyGridState, index: Int) {
  *  (#4C4C4C) 胶囊贴右缘（右边距 13dp），内部上下两个 8×4dp 白色小三角。不滚动时隐藏，
  *  滚动/拖动时出现，停止约 2 秒后淡出。药丸热区比视觉大（横向左扩 12dp、纵向上下各放宽
  *  24dp），抓住上下拖即按比例直滚宫格（目标位置含行内偏移，全程连续无逐行跳动），拖动中
- *  不淡出；未命中的触碰不消费、自然落回宫格，照片点选与普通滚动不受影响。仅回收站宫格
- *  使用（回忆时光机不显示滚动条）。 */
+ *  不淡出；仅回收站宫格使用（回忆时光机不显示滚动条）。
+ *
+ *  手势层随可见性挂载：淡出后（shown=false 且未在拖动）或 [interactive]=false（选择模式）
+ *  时不挂 pointerInput——满高透明条只要挂着手势层，命中测试就命中最上层的它，被盖住的
+ *  宫格收不到触碰（处理器里放行不消费也无效），右列照片/选择圈就会点不了。 */
 @Composable
-private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx: Int, modifier: Modifier = Modifier) {
+private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx: Int, interactive: Boolean = true, modifier: Modifier = Modifier) {
     if (totalItems < 24) return
     val scope = rememberCoroutineScope()
     // 滚动或拖动即出现；两者都停止 2 秒后淡出（淡出期间新滚动立即重现）。
@@ -1116,63 +1121,73 @@ private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx
             .fillMaxHeight()
             .width(44.dp)
             .onSizeChanged { areaHeightPx = it.height }
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    // 命中区按下瞬间现场计算（pointerInput 不随重组重启，绝不能闭包组合期的
-                    // 派生值——全部从 gridState/areaHeightPx 现读）。
-                    val pillH = 46.dp.toPx()
-                    val travel = (areaHeightPx - pillH).coerceAtLeast(0f)
-                    val li = gridState.layoutInfo
-                    val vis = li.visibleItemsInfo
-                    val f0 = vis.firstOrNull()?.index ?: 0
-                    val l0 = vis.lastOrNull()?.index ?: f0
-                    val den = (li.totalItemsCount - (l0 - f0 + 1)).coerceAtLeast(1)
-                    val pillTop = ((f0.toFloat() / den).coerceIn(0f, 1f)) * travel
-                    val zoneLeft = size.width - (13.dp + 15.dp + 12.dp).toPx()
-                    val zoneTop = pillTop - 24.dp.toPx()
-                    val zoneBottom = pillTop + pillH + 24.dp.toPx()
-                    if (down.position.x < zoneLeft || down.position.y < zoneTop || down.position.y > zoneBottom) {
-                        return@awaitEachGesture
-                    }
-                    down.consume()
-                    dragging = true
-                    dragOffsetPx = pillTop
-                    try {
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            if (change.changedToUp()) {
-                                change.consume()
-                                break
+            // 热区必须「整层存在或整层不存在」：只要这条满高透明条上挂着 pointerInput，
+            // 命中测试就命中最上层的它，被盖住的宫格整条收不到触碰——在处理器里对未命中
+            // 的 down「放行不消费」救不了下层（真机/模拟器实测：淡出的隐形条把右缘照片
+            // 点选和选择模式右列圆圈的点击全部吞掉，即「最右列点不了」的根因）。所以滚动
+            // 条不可见（淡出且未在拖动）时不挂手势层；interactive=false（选择模式）整条
+            // 只做视觉，右缘完全让给每格右下角的圆形选择圈。
+            .then(
+                if (interactive && (shown || dragging)) {
+                    Modifier.pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            // 命中区按下瞬间现场计算（pointerInput 不随重组重启，绝不能闭包组合期的
+                            // 派生值——全部从 gridState/areaHeightPx 现读）。
+                            val pillH = 46.dp.toPx()
+                            val travel = (areaHeightPx - pillH).coerceAtLeast(0f)
+                            val li = gridState.layoutInfo
+                            val vis = li.visibleItemsInfo
+                            val f0 = vis.firstOrNull()?.index ?: 0
+                            val l0 = vis.lastOrNull()?.index ?: f0
+                            val den = (li.totalItemsCount - (l0 - f0 + 1)).coerceAtLeast(1)
+                            val pillTop = ((f0.toFloat() / den).coerceIn(0f, 1f)) * travel
+                            val zoneLeft = size.width - (13.dp + 15.dp + 12.dp).toPx()
+                            val zoneTop = pillTop - 24.dp.toPx()
+                            val zoneBottom = pillTop + pillH + 24.dp.toPx()
+                            if (down.position.x < zoneLeft || down.position.y < zoneTop || down.position.y > zoneBottom) {
+                                return@awaitEachGesture
                             }
-                            val dy = change.positionChange().y
-                            if (dy != 0f) {
-                                val t = (areaHeightPx - pillH).coerceAtLeast(0f)
-                                val newOff = (dragOffsetPx + dy).coerceIn(0f, t)
-                                if (newOff != dragOffsetPx) {
-                                    dragOffsetPx = newOff
-                                    // 绝对映射：轨道比例 → 目标条目（含行内偏移）。
-                                    val l = gridState.layoutInfo
-                                    val v = l.visibleItemsInfo
-                                    val fi = v.firstOrNull()?.index ?: 0
-                                    val la = v.lastOrNull()?.index ?: fi
-                                    val d = (l.totalItemsCount - (la - fi + 1)).coerceAtLeast(1)
-                                    val pos = (if (t > 0f) newOff / t else 0f) * d
-                                    val idx = pos.toInt().coerceIn(0, d)
-                                    val inRow = ((pos - idx) * rowHeightPx).roundToInt()
-                                    dragJob.value?.cancel()
-                                    dragJob.value = scope.launch { gridState.scrollToItem(idx, inRow) }
+                            down.consume()
+                            dragging = true
+                            dragOffsetPx = pillTop
+                            try {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                    if (change.changedToUp()) {
+                                        change.consume()
+                                        break
+                                    }
+                                    val dy = change.positionChange().y
+                                    if (dy != 0f) {
+                                        val t = (areaHeightPx - pillH).coerceAtLeast(0f)
+                                        val newOff = (dragOffsetPx + dy).coerceIn(0f, t)
+                                        if (newOff != dragOffsetPx) {
+                                            dragOffsetPx = newOff
+                                            // 绝对映射：轨道比例 → 目标条目（含行内偏移）。
+                                            val l = gridState.layoutInfo
+                                            val v = l.visibleItemsInfo
+                                            val fi = v.firstOrNull()?.index ?: 0
+                                            val la = v.lastOrNull()?.index ?: fi
+                                            val d = (l.totalItemsCount - (la - fi + 1)).coerceAtLeast(1)
+                                            val pos = (if (t > 0f) newOff / t else 0f) * d
+                                            val idx = pos.toInt().coerceIn(0, d)
+                                            val inRow = ((pos - idx) * rowHeightPx).roundToInt()
+                                            dragJob.value?.cancel()
+                                            dragJob.value = scope.launch { gridState.scrollToItem(idx, inRow) }
+                                        }
+                                        change.consume()
+                                    }
                                 }
-                                change.consume()
+                            } finally {
+                                // 手势被取消（父级截获/多点冲突）也要复位，否则药丸永远不再淡出。
+                                dragging = false
                             }
                         }
-                    } finally {
-                        // 手势被取消（父级截获/多点冲突）也要复位，否则药丸永远不再淡出。
-                        dragging = false
                     }
-                }
-            },
+                } else Modifier
+            ),
         contentAlignment = Alignment.TopEnd,
     ) {
         Box(
