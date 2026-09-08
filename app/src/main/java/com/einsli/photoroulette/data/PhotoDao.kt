@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -35,6 +36,27 @@ interface PhotoDao {
     @Query("UPDATE photos SET duration = :duration WHERE mediaId = :mediaId AND duration = 0 AND mimeType LIKE 'video/%'")
     suspend fun backfillDuration(mediaId: Long, duration: Long)
 
+    // ── 多步写的事务包装:连续的 DB 写整段包一个事务,中途失败整体回滚,不留半套中间态。
+    // 约束:这里只做纯 DB 写,慢 IO(MediaStore 扫描、文件活性探测)必须由调用方留在事务外。
+
+    // 扫描入库一条龙:insertAll → 视频时长回填 → 相册/视频开关清理(PhotoRepository.upsertFromScan 调用)。
+    @Transaction
+    suspend fun applyScan(scanned: List<PhotoEntity>, keepAlbumsUppercase: Set<String>, videosEnabled: Boolean) {
+        insertAll(scanned)
+        scanned.filter { it.duration > 0 }.forEach { backfillDuration(it.mediaId, it.duration) }
+        // 相册白名单变更:未处理、不在白名单内的行删除,让总数跟随相册选择。已处理/回收站的
+        // 行绝不动(整理历史与回收站不能被开关抹掉)。keep 规则必须与 MediaScanner.scan 的相册
+        // 过滤严格同源:ignoreCase 精确相等,用户拍板「选了哪个目录就算哪个,父目录不自动包含
+        // 子相册」——当年 scan 用前缀、清理用精确匹配,两边不一致让 451 张子目录照片每轮对账
+        // 插了又删,首页总数肉眼可见地来回跳(AGENTS.md 坑 23)。删除清单按 UPPER(album) 精确删。
+        if (keepAlbumsUppercase.isNotEmpty()) {
+            val outOfScope = poolAlbums().filter { album -> album.uppercase() !in keepAlbumsUppercase }
+            if (outOfScope.isNotEmpty()) deleteOutOfScope(outOfScope.map { it.uppercase() })
+        }
+        // 关闭「包含视频」:未处理的视频行移出候选池,让总数跟随开关。已处理/回收站的视频行保留。
+        if (!videosEnabled) deleteOutOfVideoScope()
+    }
+
     // ── candidate selection: strategy (random / oldest / largest) × date range ──
     @Query("SELECT * FROM photos WHERE state IN ('UNSEEN', 'SKIP') AND inTrash = 0 AND (:minDate IS NULL OR dateTaken >= :minDate) AND (:maxDate IS NULL OR dateTaken < :maxDate) ORDER BY RANDOM() LIMIT :limit")
     suspend fun randomCandidates(limit: Int, minDate: Long?, maxDate: Long?): List<PhotoEntity>
@@ -64,16 +86,18 @@ interface PhotoDao {
     // swipes a photo into the delete flow (confirmDeleted flips inTrash right after), so it
     // is the app's "trashed at" time; IFNULL keeps hypothetically-NULL rows at the bottom
     // and dateTaken breaks ties.
+    // 注意:谓词/排序与下方 [trashNow] 是双份维护(@Query 无法共享 WHERE 片段),改一处必须两处同步。
     @Query("SELECT * FROM photos WHERE inTrash = 1 AND gone = 0 ORDER BY IFNULL(processedAt, 0) DESC, dateTaken DESC")
     fun trashItems(): Flow<List<PhotoEntity>>
 
-    // Trash page order: most recently deleted first. processedAt is stamped when the user
-    // swipes a photo into the delete flow (confirmDeleted flips inTrash right after), so it
-    // is the app's "trashed at" time; IFNULL keeps hypothetically-NULL rows at the bottom
-    // and dateTaken breaks ties.
+    // 一次性版本,谓词/排序与 [trashItems] 完全相同,两处必须保持同步(约束见上)。
     @Query("SELECT * FROM photos WHERE inTrash = 1 AND gone = 0 ORDER BY IFNULL(processedAt, 0) DESC, dateTaken DESC")
     suspend fun trashNow(): List<PhotoEntity>
 
+    // 恢复 = 回待整理池。state 重置 UNSEEN 不会误伤别的状态:inTrash=1 只有 confirmDeleted
+    // 会写,且同一句 UPDATE 就把 state 置成 'DELETE',所以走到这里的行必然已是 DELETE
+    // (FAVORITE 更是全工程无人写入的枚举值,见 PhotoState 的使用面)。processedAt 有意保留
+    // ——它要喂周统计与连续天数,syncExternallyRestored 也是同样的处理。
     @Query("UPDATE photos SET inTrash = 0, state = 'UNSEEN' WHERE mediaId IN (:ids)")
     suspend fun restoreFromTrash(ids: List<Long>)
 
@@ -94,9 +118,11 @@ interface PhotoDao {
     @Query("SELECT COUNT(*) FROM photos WHERE state = 'KEEP' AND gone = 0")
     fun keptCount(): Flow<Int>
 
+    // 与 [totalNow] 同谓词双份维护(@Query 无法共享 WHERE 片段),改一处必须两处同步。
     @Query("SELECT COUNT(*) FROM photos WHERE gone = 0")
     fun totalCount(): Flow<Int>
 
+    // 一次性版本,谓词与 [totalCount] 完全相同,两处必须保持同步(约束见上)。
     @Query("SELECT COUNT(*) FROM photos WHERE gone = 0")
     suspend fun totalNow(): Int
 
@@ -136,6 +162,27 @@ interface PhotoDao {
     // (inTrash=0, state=UNSEEN, processedAt kept) — the caller backs out the deleted counter.
     @Query("UPDATE photos SET inTrash = 0, state = 'UNSEEN' WHERE gone = 0 AND inTrash = 1 AND mediaId IN (:ids)")
     suspend fun syncExternallyRestored(ids: List<Long>): Int
+
+    // 对账的三段连续 DB 写(deleteDeadPool → markGone → syncExternallyRestored)整段一个事务:
+    // 中途失败全部回滚,绝不留下「删了一半/标了一半」的中间态。入参由调用方在事务外备齐
+    // (MediaStore 扫描与文件活性探测是慢 IO,不能占着事务);chunked(900) 分块避开 SQLite
+    // IN 参数上限。deleteDeadPool 先行,markGone 只会命中余下的已处理行。
+    @Transaction
+    suspend fun applyReconcile(dead: List<Long>, restoredCandidates: Set<Long>): ReconcileWrites {
+        var poolDeleted = 0
+        var goneMarked = 0
+        for (chunk in dead.chunked(900)) poolDeleted += deleteDeadPool(chunk)
+        for (chunk in dead.chunked(900)) goneMarked += markGone(chunk)
+        // 常规扫描(不含系统回收站)里出现的回收站行 = 在系统相册被恢复了。
+        var restoredCount = 0
+        for (chunk in trashIds().filter { it in restoredCandidates }.chunked(900)) {
+            restoredCount += syncExternallyRestored(chunk)
+        }
+        return ReconcileWrites(poolDeleted, goneMarked, restoredCount)
+    }
+
+    // [applyReconcile] 的返回:三段写各命中多少行,仓库层补上 livenessDead 组装 ReconcileResult。
+    data class ReconcileWrites(val poolDeleted: Int, val goneMarked: Int, val restoredCount: Int)
 
     // ── weekly stats ──
     data class DayCount(val day: String, val cnt: Int)

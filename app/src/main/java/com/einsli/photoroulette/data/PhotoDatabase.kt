@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [PhotoEntity::class], version = 6, exportSchema = false)
+@Database(entities = [PhotoEntity::class], version = 7, exportSchema = true)
 abstract class PhotoDatabase : RoomDatabase() {
     abstract fun photoDao(): PhotoDao
     companion object {
@@ -34,8 +34,23 @@ abstract class PhotoDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE photos ADD COLUMN gone INTEGER NOT NULL DEFAULT 0")
             }
         }
+        // 6 → 7: photos 建四个索引(state / inTrash / dateTaken / album),定义见 PhotoEntity。
+        // 索引名必须用 Room 的生成约定 index_<表>_<列>,否则与 app/schemas/7.json 对不上,
+        // 迁移测试的 schema 校验会挂。internal:MigrationTest 直接引用,避免测试里复写一份
+        // SQL 造成两处漂移。
+        internal val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photos_state` ON `photos` (`state`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photos_inTrash` ON `photos` (`inTrash`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photos_dateTaken` ON `photos` (`dateTaken`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photos_album` ON `photos` (`album`)")
+            }
+        }
         fun create(context: Context): PhotoDatabase = Room.databaseBuilder(
             context, PhotoDatabase::class.java, "photo-roulette.db"
-        ).addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6).fallbackToDestructiveMigration().build()
+        ).addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+            // v1/v2 老库没有任何显式迁移路径(3 起才有),只能破坏性重建;v3+ 一律走显式迁移,
+            // 绝不 fallback——漏写一条迁移就静默清库,统计页的全部历史等于被抹掉(AGENTS.md 坑 8)。
+            .fallbackToDestructiveMigrationFrom(1, 2).build()
     }
 }

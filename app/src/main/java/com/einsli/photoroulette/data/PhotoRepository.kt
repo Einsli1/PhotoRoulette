@@ -43,26 +43,15 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
     }
 
     private suspend fun upsertFromScan(config: AppSettings): List<PhotoEntity> = withContext(Dispatchers.IO) {
+        // MediaStore 扫描是慢 IO,必须留在事务外;随后的 insertAll → 时长回填 → 相册/视频
+        // 开关清理是连续 DB 写,由 [PhotoDao.applyScan] 包一个事务(中途失败整体回滚)。
+        // 相册 keep 规则必须与 MediaScanner.scan 的过滤严格同源,规则细节与历史教训见 applyScan 注释。
         val scanned = scanner.scan(config.includeVideos, config.includeScreenshots, config.includedAlbums)
-        dao.insertAll(scanned)
-        // Old video rows keep duration=0 (insertAll IGNORE): backfill from the fresh scan so
-        // videos that predate the duration column also get their duration badge.
-        scanned.filter { it.duration > 0 }.forEach { dao.backfillDuration(it.mediaId, it.duration) }
-        // Drop unprocessed photos from albums that are no longer selected, so the total count
-        // tracks the album selection. Processed / trashed photos are left untouched. The keep
-        // rule MUST stay in lockstep with MediaScanner.scan's filter (case-insensitive EXACT
-        // match, user-chosen semantics: 选了哪个目录就算哪个,父目录不自动包含子相册) — 当年
-        // scan 用前缀、清理用精确匹配,两边不一致让 451 张子目录照片每轮对账插了又删,首页
-        // 总数肉眼可见地来回跳。删除清单按 UPPER(album) 精确删。
-        if (config.includedAlbums.isNotEmpty()) {
-            val keep = config.includedAlbums.map { it.uppercase() }.toSet()
-            val outOfScope = dao.poolAlbums().filter { album -> album.uppercase() !in keep }
-            if (outOfScope.isNotEmpty()) dao.deleteOutOfScope(outOfScope.map { it.uppercase() })
-        }
-        // Drop unprocessed videos when 包含视频 is turned OFF, so the pool tracks the toggle.
-        if (!config.includeVideos) {
-            dao.deleteOutOfVideoScope()
-        }
+        dao.applyScan(
+            scanned = scanned,
+            keepAlbumsUppercase = config.includedAlbums.map { it.uppercase() }.toSet(),
+            videosEnabled = config.includeVideos
+        )
         scanned
     }
 
@@ -95,18 +84,10 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
             dead.add(id)
             livenessDead++
         }
-        var poolDeleted = 0
-        var goneMarked = 0
-        // 分块避开 SQLite IN 参数上限;deleteDeadPool 先行,markGone 只会命中余下的已处理行。
-        for (chunk in dead.chunked(900)) poolDeleted += dao.deleteDeadPool(chunk)
-        for (chunk in dead.chunked(900)) goneMarked += dao.markGone(chunk)
-        // 常规扫描(不含系统回收站)里出现的回收站行 = 在系统相册被恢复了。
-        val scanIds = scanned.map { it.mediaId }.toHashSet()
-        var restoredCount = 0
-        for (chunk in dao.trashIds().filter { it in scanIds }.chunked(900)) {
-            restoredCount += dao.syncExternallyRestored(chunk)
-        }
-        ReconcileResult(poolDeleted, goneMarked, restoredCount, livenessDead)
+        // 3) 连续 DB 写(deleteDeadPool/markGone/syncExternallyRestored)整段包一个事务
+        //    ([PhotoDao.applyReconcile],分块也在里面):上面的扫描与活性探测都是慢 IO,必须留在事务外。
+        val writes = dao.applyReconcile(dead, scanned.map { it.mediaId }.toHashSet())
+        ReconcileResult(writes.poolDeleted, writes.goneMarked, writes.restoredCount, livenessDead)
     }
 
     suspend fun listAlbums(includeVideos: Boolean = false): List<String> = scanner.listAlbums(includeVideos)
