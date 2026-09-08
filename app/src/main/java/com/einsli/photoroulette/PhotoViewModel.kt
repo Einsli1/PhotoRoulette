@@ -8,8 +8,10 @@ import androidx.lifecycle.viewModelScope
 import com.einsli.photoroulette.data.*
 import com.einsli.photoroulette.media.PreviewCache
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -152,7 +154,22 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         }
     }
     // 「本周整理」用自然周窗口:本周一 00:00 起,与图表的 周一..周日 七个固定槽位一一对应。
-    private val weekStats = weekStatsFlow(LocalDate.now().with(DayOfWeek.MONDAY))
+    // 窗口的周一不能在构造期算死——进程可能跨周日午夜存活(后台/最近任务保活),算死会让
+    // 「本周」一直停在上一个自然周,新一周的整理量因窗口错位也进不了图表(评审 中-9)。
+    // 改为每天本地零点后重算一次周一:同一周内重算结果相同(distinctUntilChanged 拦下,
+    // 不重订阅 Room 流),跨周时 flatMapLatest 才换到新窗口;Doze 让零点迟一会儿也无妨,
+    // 醒来那一刻按当天日期重算即可。历史整理(weekStatsOf)不受影响——它的周一由 UI 按需
+    // 传入,本来就是冷流按订阅现算。
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val currentMonday: Flow<LocalDate> = flow {
+        while (true) {
+            emit(LocalDate.now().with(DayOfWeek.MONDAY))
+            val nextDayStart = LocalDate.now().plusDays(1).atStartOfDay(ZoneId.systemDefault())
+                .toInstant().toEpochMilli()
+            delay((nextDayStart - System.currentTimeMillis()).coerceAtLeast(1L))
+        }
+    }.distinctUntilChanged()
+    private val weekStats = currentMonday.flatMapLatest { monday -> weekStatsFlow(monday) }
     // ── 历史整理:统计页选中查看的某一周(null = 未选,仍显示本周),存该周的周一 ──
     private val selectedWeek = MutableStateFlow<LocalDate?>(null)
     val historyWeek: StateFlow<LocalDate?> = selectedWeek.asStateFlow()

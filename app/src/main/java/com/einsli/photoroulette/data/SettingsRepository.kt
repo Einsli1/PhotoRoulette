@@ -65,6 +65,8 @@ class SettingsRepository(private val context: Context) {
             strategy = p[Keys.STRATEGY] ?: "random",
         )
     }
+    // 数据层直调 worker 的重排是刻意保留的耦合:改提醒时间的入口只有 save 一处,在这里
+    // 顺手重排才不漏;搬到 ViewModel 会有时序竞态(真机已复现),不要"顺手"上提。
     suspend fun save(settings: AppSettings) = context.settingsDataStore.edit { p ->
         p[Keys.DAILY] = settings.dailyCount; p[Keys.VIDEO] = settings.includeVideos; p[Keys.SCREENSHOTS] = settings.includeScreenshots
         p[Keys.HOUR] = settings.reminderHour; p[Keys.MINUTE] = settings.reminderMinute

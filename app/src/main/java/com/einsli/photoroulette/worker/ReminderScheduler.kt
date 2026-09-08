@@ -9,9 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.einsli.photoroulette.AppContainer
 import com.einsli.photoroulette.MainActivity
+import com.einsli.photoroulette.PhotoRouletteApp
 import com.einsli.photoroulette.R
-import com.einsli.photoroulette.data.SettingsRepository
 import kotlinx.coroutines.flow.first
 import java.time.Instant
 import java.time.LocalDate
@@ -57,9 +58,15 @@ object ReminderScheduler {
      *                 replace=true,会把"今天已武装待发"的补发覆盖成明天。
      */
     suspend fun reschedule(context: Context, replace: Boolean = true) {
-        val settings = SettingsRepository(context).settings.first()
+        val settings = container(context).settings.settings.first()
         schedule(context, settings.reminderHour, settings.reminderMinute, replace = replace)
     }
+
+    /** 从 Application 上的容器取进程唯一的依赖(原先这里每次重排都 new 一个
+     *  SettingsRepository,与 MainActivity 持有的实例互不相识)。闹钟/开机接收器被系统
+     *  拉起时进程必先创建 Application,取容器不会落空。 */
+    private fun container(context: Context): AppContainer =
+        (context.applicationContext as PhotoRouletteApp).container
 
     /**
      * @param replace true = 用户主动改时间/闹钟已触发,直接按设置重排;

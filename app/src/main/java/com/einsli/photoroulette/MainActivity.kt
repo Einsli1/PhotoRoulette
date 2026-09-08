@@ -18,7 +18,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.einsli.photoroulette.data.*
-import com.einsli.photoroulette.media.MediaScanner
+// Application 类与 ui 包的 Composable PhotoRouletteApp 同名,别名区分。
+import com.einsli.photoroulette.PhotoRouletteApp as PhotoRouletteApplication
 import com.einsli.photoroulette.ui.PhotoRouletteApp
 import com.einsli.photoroulette.worker.ReminderScheduler
 import kotlinx.coroutines.Dispatchers
@@ -31,10 +32,10 @@ class MainActivity : ComponentActivity() {
         /** 通知/系统闹钟点击携带该 extra 时,App 直达整理页(路由见 ui/App.kt 的 openReviewRequest)。 */
         const val EXTRA_OPEN_REVIEW = "com.einsli.photoroulette.open_review"
     }
-    private val database by lazy { PhotoDatabase.create(applicationContext) }
-    private val settings by lazy { SettingsRepository(applicationContext) }
-    private val repository by lazy { PhotoRepository(database.photoDao(), MediaScanner(contentResolver), settings) }
-    private val viewModel by viewModels<PhotoViewModel> { PhotoViewModel.Factory(repository, settings) }
+    // 仓库/设置/扫描器/数据库统一从 Application 上的 AppContainer 取(进程唯一实例),
+    // 不再在本 Activity 里各自 lazy 组装——worker 层的 ReminderScheduler 取的也是同一份。
+    private val container by lazy { (application as PhotoRouletteApplication).container }
+    private val viewModel by viewModels<PhotoViewModel> { PhotoViewModel.Factory(container.repository, container.settings) }
     private enum class PendingOp { TRASH, RESTORE }
     private var pendingOp: PendingOp? = null
     private var pendingIds: List<Long> = emptyList()
@@ -97,7 +98,7 @@ class MainActivity : ComponentActivity() {
     // 权限变化(精确闹钟授权)后的升级会在下一次触发的重排里自然生效。
 
     private fun rescheduleFromSettings() = lifecycleScope.launch {
-        val cfg = try { settings.settings.first() } catch (_: Exception) { AppSettings() }
+        val cfg = try { container.settings.settings.first() } catch (_: Exception) { AppSettings() }
         ReminderScheduler.schedule(this@MainActivity, cfg.reminderHour, cfg.reminderMinute, replace = false)
     }
 
@@ -127,7 +128,9 @@ class MainActivity : ComponentActivity() {
             }
         }
         // Silently remove records for photos that no longer exist on the system.
-        val gone = photos.filter { it !in valid }
+        // mediaId 判定用 HashSet:valid 是 List,逐条 `it !in valid` 是 O(n²),批量时会卡主线程。
+        val validIds = valid.mapTo(HashSet()) { it.mediaId }
+        val gone = photos.filter { it.mediaId !in validIds }
         if (gone.isNotEmpty()) {
             viewModel.deleteFromTrash(gone.map { it.mediaId })
         }

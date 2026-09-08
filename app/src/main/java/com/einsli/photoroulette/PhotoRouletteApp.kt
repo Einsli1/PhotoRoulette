@@ -15,6 +15,9 @@ import coil.memory.MemoryCache
  *  （两者不合并，后设置者生效），曾在 MainActivity 里覆盖注册视频解码器，导致这里的
  *  40% 内存缓存整体失效。 */
 class PhotoRouletteApp : Application(), ImageLoaderFactory {
+    /** 全局 DI 容器:数据库/设置/扫描器/仓库的进程唯一持有点,UI 与 worker 层统一从这里取。 */
+    val container by lazy { AppContainer(this) }
+
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
             .components { add(VideoFrameDecoder.Factory()) }
