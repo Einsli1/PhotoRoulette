@@ -1112,7 +1112,12 @@ private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx
     val first = visible.firstOrNull()?.index ?: 0
     val span = ((visible.lastOrNull()?.index ?: first) - first + 1).coerceAtLeast(1)
     val denom = (total - span).coerceAtLeast(1)
-    val frac = (first.toFloat() / denom).coerceIn(0f, 1f)
+    // 行空间连续比例 = 当前滚动像素 / 可滚动行程（denom 格 ÷ 每行 4 格 × 行高）。
+    // 首行已滚过的像素（firstVisibleItemScrollOffset）必须计入，否则药丸在一个行高内
+    // 只能阶梯跳；与拖拽映射共用同一公式，松手交还时两边一致、药丸不跳。
+    val maxScrollPx = denom * rowHeightPx / 4f
+    val frac = (((first / 4) * rowHeightPx + gridState.firstVisibleItemScrollOffset) / maxScrollPx)
+        .coerceIn(0f, 1f)
     val density = LocalDensity.current
     val thumbHeightPx = with(density) { 46.dp.toPx() }
     val travelPx = (areaHeightPx - thumbHeightPx).coerceAtLeast(0f)
@@ -1140,8 +1145,15 @@ private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx
                             val vis = li.visibleItemsInfo
                             val f0 = vis.firstOrNull()?.index ?: 0
                             val l0 = vis.lastOrNull()?.index ?: f0
+                            // den/maxScrollPx 在 down 时快照、整个手势内复用。分母绝不能在 move
+                            // 里随「滚动结果」重读：新行从底边进入 → 可见数变 → 目标被回拉 →
+                            // 行又被推出 → 下一事件再进入，形成进/出振荡（慢拖抖动的放大器）。
                             val den = (li.totalItemsCount - (l0 - f0 + 1)).coerceAtLeast(1)
-                            val pillTop = ((f0.toFloat() / den).coerceIn(0f, 1f)) * travel
+                            val maxScrollPx = den * rowHeightPx / 4f
+                            // 药丸起点与宫格共用同一连续公式（含首行偏移）：抓起瞬间映射目标
+                            // 恰等于当前位置，内容不跳。
+                            val pillTop = (((f0 / 4) * rowHeightPx + gridState.firstVisibleItemScrollOffset) / maxScrollPx)
+                                .coerceIn(0f, 1f) * travel
                             val zoneLeft = size.width - (13.dp + 15.dp + 12.dp).toPx()
                             val zoneTop = pillTop - 24.dp.toPx()
                             val zoneBottom = pillTop + pillH + 24.dp.toPx()
@@ -1165,17 +1177,23 @@ private fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx
                                         val newOff = (dragOffsetPx + dy).coerceIn(0f, t)
                                         if (newOff != dragOffsetPx) {
                                             dragOffsetPx = newOff
-                                            // 绝对映射：轨道比例 → 目标条目（含行内偏移）。
-                                            val l = gridState.layoutInfo
-                                            val v = l.visibleItemsInfo
-                                            val fi = v.firstOrNull()?.index ?: 0
-                                            val la = v.lastOrNull()?.index ?: fi
-                                            val d = (l.totalItemsCount - (la - fi + 1)).coerceAtLeast(1)
-                                            val pos = (if (t > 0f) newOff / t else 0f) * d
-                                            val idx = pos.toInt().coerceIn(0, d)
-                                            val inRow = ((pos - idx) * rowHeightPx).roundToInt()
+                                            // 绝对映射：轨道比例 → 滚动像素 → 行坐标（含行内偏移）。
+                                            // 4 列宫格连续 4 格同属一行，必须先把格坐标折成行坐标：
+                                            // 若拿「格子小数 × 行高」当行内偏移，格子序号每越过整数，
+                                            // 落点都会从「行顶+近一行高」瞬回「行顶」，内容呈锯齿弹跳
+                                            // （慢拖时约每 1px 手指弹一次，肉眼可见）。
+                                            val ratio = if (t > 0f) newOff / t else 0f
+                                            val targetPx = ratio * maxScrollPx
+                                            val rowF = targetPx / rowHeightPx
+                                            val row = rowF.toInt()
+                                            val inRow = ((rowF - row) * rowHeightPx).roundToInt()
                                             dragJob.value?.cancel()
-                                            dragJob.value = scope.launch { gridState.scrollToItem(idx, inRow) }
+                                            dragJob.value = scope.launch {
+                                                // 现读 totalItemsCount 兜底：拖动中列表若被清减，
+                                                // scrollToItem 的 index 也绝不越界。
+                                                val last = gridState.layoutInfo.totalItemsCount - 1
+                                                gridState.scrollToItem((row * 4).coerceAtMost(last), inRow)
+                                            }
                                         }
                                         change.consume()
                                     }
