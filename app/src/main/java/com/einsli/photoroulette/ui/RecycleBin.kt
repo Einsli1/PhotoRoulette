@@ -320,7 +320,7 @@ import com.einsli.photoroulette.data.PhotoEntity
                                     }
                                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                                         Text("回收站", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                                        Text(formatBytes(trashBytes), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                                        Text(formatCapacity(trashBytes), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
                                     }
                                     IconButton(onClick = { selectMode = true }) {
                                         Icon(Icons.Outlined.Delete, "选择照片", tint = Color.White)
@@ -559,19 +559,6 @@ private fun TrashPillAction(icon: ImageVector, label: String, enabled: Boolean, 
         Icon(icon, label, tint = Color.White.copy(alpha = alpha), modifier = Modifier.size(22.dp))
         Spacer(Modifier.height(2.dp))
         Text(label, color = Color.White.copy(alpha = alpha), fontSize = 12.sp)
-    }
-}
-
-/** 与 Home.kt/StatsScreen.kt 同规则的容量格式化（4.69GB 样式），回收站副标题用。 */
-private fun formatBytes(b: Long): String {
-    val gb = b / 1_073_741_824.0
-    val mb = b / 1_048_576.0
-    val kb = b / 1024.0
-    return when {
-        gb >= 1 -> String.format("%.1fGB", gb)
-        mb >= 1 -> String.format("%.0fMB", mb)
-        kb >= 1 -> String.format("%.0fKB", kb)
-        else -> "0B"
     }
 }
 
