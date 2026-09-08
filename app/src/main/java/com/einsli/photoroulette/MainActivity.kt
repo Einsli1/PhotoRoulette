@@ -21,8 +21,10 @@ import com.einsli.photoroulette.data.*
 import com.einsli.photoroulette.media.MediaScanner
 import com.einsli.photoroulette.ui.PhotoRouletteApp
 import com.einsli.photoroulette.worker.ReminderScheduler
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -115,10 +117,14 @@ class MainActivity : ComponentActivity() {
         // Validate each URI before calling createTrashRequest — photos may have been
         // deleted externally, and passing a stale URI to MediaStore throws
         // IllegalArgumentException ("Invalid Uri") which crashes the app.
-        val valid = photos.filter { photo ->
-            try {
-                contentResolver.query(Uri.parse(photo.uri), null, null, null, null)?.use { it.count > 0 } ?: false
-            } catch (_: Exception) { false }
+        // contentResolver.query 是同步 binder IPC,逐条校验不能留在主线程
+        // (批量时串行阻塞 N 次);withContext 结束后自动回主线程,后续 UI 操作不变。
+        val valid = withContext(Dispatchers.IO) {
+            photos.filter { photo ->
+                try {
+                    contentResolver.query(Uri.parse(photo.uri), null, null, null, null)?.use { it.count > 0 } ?: false
+                } catch (_: Exception) { false }
+            }
         }
         // Silently remove records for photos that no longer exist on the system.
         val gone = photos.filter { it !in valid }
@@ -148,10 +154,13 @@ class MainActivity : ComponentActivity() {
         val photos = viewModel.trashList().filter { it.mediaId in ids }
         if (photos.isEmpty()) return@launch
         // Filter out photos whose URIs are no longer valid (deleted externally).
-        val valid = photos.filter { photo ->
-            try {
-                contentResolver.query(Uri.parse(photo.uri), null, null, null, null)?.use { it.count > 0 } ?: false
-            } catch (_: Exception) { false }
+        // 同 movePendingToTrash:逐条 query 是阻塞 IO,移入 Dispatchers.IO。
+        val valid = withContext(Dispatchers.IO) {
+            photos.filter { photo ->
+                try {
+                    contentResolver.query(Uri.parse(photo.uri), null, null, null, null)?.use { it.count > 0 } ?: false
+                } catch (_: Exception) { false }
+            }
         }
         if (valid.isEmpty()) {
             // All selected photos are already gone — just remove them from our DB.
