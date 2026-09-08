@@ -70,6 +70,12 @@ private val DarkFallback = darkColorScheme(
     surfaceContainerHighest = Color(0xFF222A38),
 )
 
+/**
+ * [dynamicColor] 当前是**不生效的占位参数**：品牌配色固定取自下方 light.png / dark.png
+ * 参考设计，壁纸取色（Material You）刻意不启用——无论传什么值，渲染结果都一样。调用方
+ * （App.kt）仍会传入该参数，删除签名就得改调用点，故仅保留并在此说明，避免误以为传
+ * true 能开启动态取色。
+ */
 @Composable fun PhotoRouletteTheme(
     dark: Boolean,
     dynamicColor: Boolean = true,

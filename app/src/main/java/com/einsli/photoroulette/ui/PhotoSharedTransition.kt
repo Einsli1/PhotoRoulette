@@ -2,6 +2,7 @@ package com.einsli.photoroulette.ui
 
 import android.app.Activity
 import androidx.activity.compose.BackHandler
+import androidx.collection.LruCache
 import androidx.compose.animation.BoundsTransform
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
@@ -86,11 +87,15 @@ fun photoSharedKey(mediaId: Long): String = "photo-$mediaId"
  * (否则首帧会闪一帧 Fit 渲染,正是本次要消除的突变)。
  */
 object PhotoAspectCache {
-    private val map = HashMap<Long, Float>()
+    // LRU 上界：无界 HashMap 会随相册浏览无限堆积。几百条足够覆盖单屏宫格+预览翻页的
+    // 工作集；被淘汰的条目下次缩略图解码时会重新写入，对调用方而言与未命中无异
+    // （get 返回 null → cropRatio 退化为 1，纯 Fit、无 morph，行为不变）。
+    private const val MAX_ENTRIES = 512
+    private val map = LruCache<Long, Float>(MAX_ENTRIES)
     fun put(mediaId: Long, aspect: Float) {
-        if (aspect.isFinite() && aspect > 0f) map[mediaId] = aspect
+        if (aspect.isFinite() && aspect > 0f) map.put(mediaId, aspect)
     }
-    fun get(mediaId: Long): Float? = map[mediaId]
+    fun get(mediaId: Long): Float? = map.get(mediaId)
 }
 
 /** 在**方形宫格**里,ContentScale.Crop 比 ContentScale.Fit 放大多少倍。对 w×h 的图

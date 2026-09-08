@@ -21,3 +21,4 @@ gen_icons.ps1
 *.patch
 agent.md
 AGENTS.md
+tmp_shared_src/

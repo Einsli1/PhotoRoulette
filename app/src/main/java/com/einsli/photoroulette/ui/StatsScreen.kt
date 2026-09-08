@@ -62,18 +62,6 @@ import java.time.YearMonth
 import java.time.temporal.ChronoUnit
 import kotlin.math.roundToInt
 
-private fun formatBytes(b: Long): String {
-    val gb = b / 1_073_741_824.0
-    val mb = b / 1_048_576.0
-    val kb = b / 1024.0
-    return when {
-        gb >= 1 -> String.format("%.1fGB", gb)
-        mb >= 1 -> String.format("%.0fMB", mb)
-        kb >= 1 -> String.format("%.0fKB", kb)
-        else -> "0B"
-    }
-}
-
 private fun formatCount(n: Int): String = String.format("%,d", n)
 
 private fun weekdayLabel(d: DayOfWeek): String = when (d) {
@@ -322,7 +310,7 @@ fun StatsScreen(
                 Modifier.weight(1f),
                 badge = dc.badgeSpace,
                 icon = { Icon(Icons.Default.Delete, null, tint = dc.badgeSpaceIcon, modifier = Modifier.size(22.dp)) },
-                value = formatBytes(stats.trashBytes),
+                value = formatCapacity(stats.trashBytes),
                 label = "释放空间"
             )
             BigStat(
@@ -427,7 +415,7 @@ private fun WeekCardContent(
             WeekMini(if (isCurrentWeek) "本周整理" else "整理", "${week.organized} 张", Modifier.weight(1f), dc)
             WeekMini("删除", "${week.deleted} 张", Modifier.weight(1f), dc)
             WeekMini("保留", "${week.kept} 张", Modifier.weight(1f), dc)
-            WeekMini("释放", formatBytes(week.freedBytes), Modifier.weight(1f), dc)
+            WeekMini("释放", formatCapacity(week.freedBytes), Modifier.weight(1f), dc)
         }
     }
 }

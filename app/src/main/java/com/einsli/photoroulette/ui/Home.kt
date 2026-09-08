@@ -32,18 +32,6 @@ import com.einsli.photoroulette.R
 import com.einsli.photoroulette.data.PhotoEntity
 import kotlin.math.roundToInt
 
-private fun formatBytes(b: Long): String {
-    val gb = b / 1_073_741_824.0
-    val mb = b / 1_048_576.0
-    val kb = b / 1024.0
-    return when {
-        gb >= 1 -> String.format("%.1fGB", gb)
-        mb >= 1 -> String.format("%.0fMB", mb)
-        kb >= 1 -> String.format("%.0fKB", kb)
-        else -> "0B"
-    }
-}
-
 /**
  * The redesigned home screen. Sized to fill the viewport without scrolling:
  * a weight spacer at the bottom absorbs whatever vertical space is left.
@@ -357,7 +345,7 @@ private fun StatsRow(state: AppUiState) {
                 modifier = Modifier.weight(1f),
                 badge = dc.badgeSpace,
                 icon = { Icon(Icons.Default.Delete, null, tint = dc.badgeSpaceIcon, modifier = Modifier.size(18.dp)) },
-                value = formatBytes(stats.trashBytes),
+                value = formatCapacity(stats.trashBytes),
                 label = "释放空间"
             )
             StatItem(
