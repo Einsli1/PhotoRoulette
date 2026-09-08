@@ -1526,19 +1526,37 @@ private fun formatTaken(taken: Long): String =
                     doubleTapZoom = true,
                 )
             }
-            Text(
-                formatTaken(photo.dateTaken),
-                modifier = Modifier
+            Column(
+                Modifier
                     .align(Alignment.TopStart)
                     // 固定在状态栏 + 标题栏（返回按钮 ~54dp）下方；用进入页面时捕获的状态栏
                     // 高度，状态栏隐藏时时间戳不会跟着跳到屏幕顶端。
                     .padding(start = 12.dp, top = statusBarTop + 64.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color.Black.copy(alpha = 0.45f))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = Color.White
-            )
+            ) {
+                // 图片名字：位置在时间上方，样式与时间一致（同款黑底药丸 + bodySmall 白字）。
+                Text(
+                    photo.displayName,
+                    modifier = Modifier
+                        .widthIn(max = 280.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    formatTaken(photo.dateTaken),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White
+                )
+            }
         }
         // Flying-out photo on top (rendered last = topmost), so it visibly slides off over the
         // already-revealed next photo.
