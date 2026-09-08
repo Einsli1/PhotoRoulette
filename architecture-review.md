@@ -6,6 +6,20 @@
 
 ---
 
+## ✅ 重构进度（2026-09-08，refactor/architecture-review 已合回 master）
+
+- **高-2 主线程 IO**：已修——movePendingToTrash/restoreFromSystemTrash 的 URI 校验循环移入 `withContext(Dispatchers.IO)`。
+- **高-3 迁移即清库**：已修——`exportSchema` 开启（`app/schemas/6.json`、`7.json` 入库）；version 7 显式迁移补 4 个索引（state/inTrash/dateTaken/album）；无条件破坏性回退改为仅 v1/v2 兜底；`MigrationTest` 迁移测试已上真机跑通 6→7。
+- **中-5 App.kt god file**：部分完成——回收站/回忆/整理/设置四屏与预载引擎、滚动条已拆独立文件（App.kt 2195→457 行），对外接缝与行为零变化；**MediaGridScreen 去重与路由 enum 未做**（下一步）。
+- **中-7 Room 细节**：索引与 `@Transaction`（DAO default 方法 `applyScan`/`applyReconcile`，慢 IO 留在事务外）已做；SQL 双份（trashItems/trashNow 等）按务实处理紧邻放置并加同步注释，未消除双份。
+- **中-8 手写 DI 分散**：已修——`AppContainer` 挂在 Application 上统一组装 database/settings/mediaScanner/repository；ReminderScheduler 经容器取 SettingsRepository，守卫/降级语义逐字未动。
+- **中-9 一致性小坑**：restoreFromTrash「丢 FAVORITE」查证为不可达路径（FAVORITE 全工程无写入，已加注释）；weekStats 跨周不刷新已修（冷流按日重算周一）；save→ReminderScheduler 耦合刻意保留（真机时序竞态，见代码注释）；相册规则已单一来源（坑 23 修净，本轮复核确认）。
+- **中-10 重复代码**：formatBytes 三份归一为 `Format.kt/formatCapacity`；进度卡/StatItem≈BigStat/placeholder 淡入经逐对 diff 均有实质差异（圆角、字号、动画方向等），按「宁缺毋滥」维持现状；SwipePhoto 手写缓动三份随拆分原样搬入 Review.kt，未去重。
+- **低优先级**：O(n²) `it !in valid` 已修（mediaId HashSet）；PhotoAspectCache 改 `LruCache(512)`；dynamicColor 误导参数已文档化（调用方在 App.kt，行为不动）；kapt→KSP（1.9.25-1.0.20）；未使用的 navigation-compose 依赖已删；tmp_shared_src 已移出版本控制（磁盘保留）；README 已校正（7af8ae1）。
+- **未做**：高-4 静默失败 UI 信号（需产品设计）；中-5 剩余（MediaGridScreen 去重、路由 enum）；中-6 UI 模型层切断 Entity 直漏；低-19 VideoPhoto 轮询优化。
+
+---
+
 ## 一、项目画像
 
 完全离线的 Android 相册整理工具：宫格浏览 → 轮盘决策保留/删除 → 回收站 → 统计/回忆。无后端、无网络。
