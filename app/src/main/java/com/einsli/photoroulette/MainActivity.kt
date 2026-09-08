@@ -17,9 +17,6 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import coil.Coil
-import coil.ImageLoader
-import coil.decode.VideoFrameDecoder
 import com.einsli.photoroulette.data.*
 import com.einsli.photoroulette.media.MediaScanner
 import com.einsli.photoroulette.ui.PhotoRouletteApp
@@ -68,12 +65,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Register the video-frame decoder on the singleton ImageLoader: coil-video 2.7.0 does
-        // not self-register via ServiceLoader, and without it video content:// URIs fail to
-        // decode (the 包含视频 pool would show blank cards instead of frames).
-        Coil.setImageLoader {
-            ImageLoader.Builder(applicationContext).components { add(VideoFrameDecoder.Factory()) }.build()
-        }
+        // 图片加载器的全局配置（视频帧解码器 + 40% 内存缓存）统一在 PhotoRouletteApp
+        // 的 newImageLoader() 里，不要在这里再调 Coil.setImageLoader 覆盖单例——覆盖
+        // 不合并配置，会把那里的 40% 内存缓存整体顶掉（历史坑，见该文件注释）。
         if (intent.getBooleanExtra(EXTRA_OPEN_REVIEW, false)) openReviewRequest.intValue = 1
         // 用设置的提醒时间重排每日闹钟(不依赖上一次打开时硬编码的 20:00)。DataStore 读取失败时
         // 退回默认时间,保证闹钟总能被注册。

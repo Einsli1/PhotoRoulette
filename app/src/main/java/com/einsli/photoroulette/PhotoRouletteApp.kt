@@ -3,13 +3,21 @@ package com.einsli.photoroulette
 import android.app.Application
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.decode.VideoFrameDecoder
 import coil.memory.MemoryCache
 
-/** 全局图片加载器：内存缓存提到 40% 堆上限（默认 25%），配合缩略图降采样，
- *  让宫格预载窗口内及浏览过的缩略图常驻内存，滑回来直接命中、不再反复解码。 */
+/** 全局图片加载器（进程唯一；Coil 在首次请求图片时才懒构建本单例）：内存缓存提到
+ *  40% 堆上限（默认 25%），配合缩略图降采样，让宫格预载窗口内及浏览过的缩略图常驻
+ *  内存，滑回来直接命中、不再反复解码；并注册视频帧解码器——coil-video 2.7.0 不经
+ *  ServiceLoader 自注册，缺它视频 content:// URI 解不出来（宫格里视频卡片全空白）。
+ *
+ *  这里是加载器的唯一配置点：不要再调 Coil.setImageLoader——它会整体覆盖本配置
+ *  （两者不合并，后设置者生效），曾在 MainActivity 里覆盖注册视频解码器，导致这里的
+ *  40% 内存缓存整体失效。 */
 class PhotoRouletteApp : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
+            .components { add(VideoFrameDecoder.Factory()) }
             .memoryCache {
                 // 用 Runtime.maxMemory 计算（感知 largeHeap），而不是 memoryClass。
                 MemoryCache.Builder(this)
