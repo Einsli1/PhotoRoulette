@@ -6,17 +6,18 @@
 
 ---
 
-## ✅ 重构进度（2026-09-08，refactor/architecture-review 已合回 master）
+## ✅ 重构进度（2026-09-08 起，refactor/architecture-review 已合回 master；2026-09-09 更新：ee4201 完成任务 1–3；最新：MediaGridScreen 去重完成，中-5 全部落地）
 
 - **高-2 主线程 IO**：已修——movePendingToTrash/restoreFromSystemTrash 的 URI 校验循环移入 `withContext(Dispatchers.IO)`。
 - **高-3 迁移即清库**：已修——`exportSchema` 开启（`app/schemas/6.json`、`7.json` 入库）；version 7 显式迁移补 4 个索引（state/inTrash/dateTaken/album）；无条件破坏性回退改为仅 v1/v2 兜底；`MigrationTest` 迁移测试已上真机跑通 6→7。
-- **中-5 App.kt god file**：部分完成——回收站/回忆/整理/设置四屏与预载引擎、滚动条已拆独立文件（App.kt 2195→457 行），对外接缝与行为零变化；**MediaGridScreen 去重与路由 enum 未做**（下一步）。
+- **中-5 App.kt god file**：已完成——回收站/回忆/整理/设置四屏与预载引擎、滚动条已拆独立文件（App.kt 2195→465 行），对外接缝与行为零变化；路由魔法 int 已改 `Page` enum（ee4201：`when` 分发由编译器保证穷尽、enum 为 Serializable 可直接进 `rememberSaveable`，新增页面漏写分支直接编译失败）；最后一块 **MediaGridScreen 去重**（RecycleBin↔MemoryViewer 约 85% 重复）已完成——新增 `ui/MediaGridScreen.kt` 共享宫格页骨架（预览状态机/SpringPull 弹性宫格/渐变悬浮头/选择模式/预览 overlay），RecycleBin.kt 570→106 行、MemoryViewer.kt 260→45 行，两页差异收敛为参数 + 插槽（配色/留白/解码比例/滚动条/头部/预览头/`MediaGridSelection` 选择动作）。
+- **中-6 实体直漏 UI**：已修（ee4201）——新增 `model/PhotoItem.kt` UI 模型（mediaId/uri/displayName/dateTaken/mimeType/duration/state 最小集，UI 需要时再按需加字段）；Repository 的 Room Flow 在 ViewModel 边界经 `toItem()/toItems()` 映射：trashItems、会话队列（`ReviewSession.queue`）、pendingDeletes/trashList、memoryCandidates（buildMemory）全部改吐 `PhotoItem`，`ui/` 各 Composable 与 MainActivity 已零 `PhotoEntity` 引用（现仅存于 data/media 层与 ViewModel 私有映射处）。
 - **中-7 Room 细节**：索引与 `@Transaction`（DAO default 方法 `applyScan`/`applyReconcile`，慢 IO 留在事务外）已做；SQL 双份（trashItems/trashNow 等）按务实处理紧邻放置并加同步注释，未消除双份。
 - **中-8 手写 DI 分散**：已修——`AppContainer` 挂在 Application 上统一组装 database/settings/mediaScanner/repository；ReminderScheduler 经容器取 SettingsRepository，守卫/降级语义逐字未动。
 - **中-9 一致性小坑**：restoreFromTrash「丢 FAVORITE」查证为不可达路径（FAVORITE 全工程无写入，已加注释）；weekStats 跨周不刷新已修（冷流按日重算周一）；save→ReminderScheduler 耦合刻意保留（真机时序竞态，见代码注释）；相册规则已单一来源（坑 23 修净，本轮复核确认）。
 - **中-10 重复代码**：formatBytes 三份归一为 `Format.kt/formatCapacity`；进度卡/StatItem≈BigStat/placeholder 淡入经逐对 diff 均有实质差异（圆角、字号、动画方向等），按「宁缺毋滥」维持现状；SwipePhoto 手写缓动三份随拆分原样搬入 Review.kt，未去重。
 - **低优先级**：O(n²) `it !in valid` 已修（mediaId HashSet）；PhotoAspectCache 改 `LruCache(512)`；dynamicColor 误导参数已文档化（调用方在 App.kt，行为不动）；kapt→KSP（1.9.25-1.0.20）；未使用的 navigation-compose 依赖已删；tmp_shared_src 已移出版本控制（磁盘保留）；README 已校正（7af8ae1）。
-- **未做**：高-4 静默失败 UI 信号（需产品设计）；中-5 剩余（MediaGridScreen 去重、路由 enum）；中-6 UI 模型层切断 Entity 直漏；低-19 VideoPhoto 轮询优化。
+- **未做**：高-4 静默失败 UI 信号（需产品设计）；低-19 VideoPhoto 轮询优化。
 
 ---
 
@@ -56,7 +57,7 @@ AlarmManager ←──(save 副作用)────────────┘   
 |---|---|
 | 数据层 | **全项目最扎实**。Flow/suspend 约定清晰（`PhotoRepository.kt:16-21,140`）；对账 reconcile 防御性极强：空判即放弃（:82）、MIUI 活性探测 fail-open（:91-97）、`chunked(900)` 防 SQLite 变量上限（:101）。短板：无索引、无 @Transaction 包多步写、`exportSchema=false` + 破坏性回退 |
 | ViewModel | 合格但偏胖：会话/统计/回忆/撤销/防幽灵点击/十几个 setter 全在一个 544 行类里（`PhotoViewModel.kt:279-539`）；冷启动 `runBlocking` 快照（:190-235）有注释背书但仍是主线程风险 |
-| UI 屏幕层 | **债务最重**。App.kt 一个文件装了导航 + 4 个屏幕 + 15 个组件 + 预载引擎（2195 行）；RecycleBin（395 行）与 MemoryViewer（215 行）两套宫格/预载/预览/渐变头约 85% 重复 |
+| UI 屏幕层 | **曾是最重债务，已大部还清**：App.kt 已拆至 465 行；RecycleBin↔MemoryViewer 约 85% 重复已收敛为共享 `ui/MediaGridScreen.kt`（RecycleBin.kt 570→106 行、MemoryViewer.kt 260→45 行，差异走参数+插槽） |
 | UI 组件层 | **独立性最好**。SpringPull / PopupWheel / ZoomablePhoto / PhotoSharedTransition 基本可脱离业务复用，手势细节（阻尼、坐标补偿、逐事件钳制）水准高 |
 
 ## 四、问题清单（按优先级）
@@ -75,13 +76,15 @@ AlarmManager ←──(save 副作用)────────────┘   
 
 ### 中（可维护性/性能）
 
-5. **App.kt god file（2195 行）**：导航 + 4 屏 + 15 组件 + 预载引擎全在一文件。
+5. **App.kt god file（2195 行，已修）**：导航 + 4 屏 + 15 组件 + 预载引擎全在一文件。
    超长 Composable：RecycleBin≈395 行（678-1072）、SwipePhoto≈244（1351-1594）、PhotoRouletteApp≈241（147-387）、
    Settings≈220（1596-1815）、MemoryViewer≈215（1981-2195）。
    **RecycleBin↔MemoryViewer 约 85% 重复**：6 态 shared-key 状态机（692-716↔1989-1999）、key 重开 scope
    （757-758↔2029-2030）、SpringPullBox lambda（785-796↔2050-2061）、宫格配置（806-814↔2071-2079）、
    头部渐变+吞触碰（896-911↔2115-2130）、SharedPhotoPreview 配置（984-1041↔2153-2188）。
    路由用魔法 int（128/131/404-434），PageContent 12 参（391-403）。
+   ——上述已全部落地：四屏拆独立文件（App.kt 2195→465 行）、`Page` enum 路由、预载/滚动条独立文件、
+   MediaGridScreen 去重完成（见顶部进度）。
 6. **实体直漏 UI**：`PhotoEntity` Flow 直接进界面（`PhotoRepository.kt:21,140`），DB 演进波及全部 UI。
 7. **Room 细节**：state/inTrash/gone/dateTaken/album 无索引（`PhotoEntity.kt` 全文无 @Index）；
    reconcile/upsertFromScan 多步写无 @Transaction（`PhotoRepository.kt:47-65, 98-108`），一致性全靠幂等重试兜底；
@@ -126,10 +129,9 @@ AlarmManager ←──(save 副作用)────────────┘   
 1. ~~修 Coil 加载器冲突~~（本轮已完成）+ 回收站校验移 IO 线程（半天内可完成的两个高危）。
 2. 开 `exportSchema` + Room 迁移测试，去掉破坏性回退；给 photos 表补索引（state/inTrash/dateTaken/album）；
    reconcile/upsertFromScan 包 @Transaction。
-3. 拆 App.kt：先提公共 `MediaGridScreen`（回收站/回忆共用 85% 重复），再拆预载引擎与滚动条到独立文件，
-   路由魔法 int 改 enum。
-4. 收敛为一个 `AppContainer`，统一组装仓库与调度器，为测试铺路。
-5. 引入 UI 模型层切断 Entity 直漏；顺手清理低优先级项（KSP、README、tmp_shared_src、重复工具函数）。
+3. 拆 App.kt：~~再拆预载引擎与滚动条到独立文件，路由魔法 int 改 enum~~（已完成，enum 见 ee4201）；~~提公共 `MediaGridScreen`（回收站/回忆共用 85% 重复）~~（已完成——中-5 最后一块落地，见顶部进度）。
+4. ~~收敛为一个 `AppContainer`，统一组装仓库与调度器，为测试铺路。~~（已完成）
+5. ~~引入 UI 模型层切断 Entity 直漏~~（已完成，ee4201）；~~顺手清理低优先级项（KSP、README、tmp_shared_src、重复工具函数）~~（已完成）。
 
 ## 一句话总结
 
