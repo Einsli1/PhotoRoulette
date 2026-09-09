@@ -11,7 +11,7 @@ import coil.request.ImageRequest
 import coil.request.SuccessResult
 import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
-import com.einsli.photoroulette.data.PhotoEntity
+import com.einsli.photoroulette.model.PhotoItem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -55,7 +55,7 @@ object PreviewCache {
     fun hasPreview(context: Context, mediaId: Long): Boolean = fileFor(context, mediaId).exists()
 
     /** 首页封面请求:小图存在 → 直接用(打开即显);否则回退原图(同参,视频仍抽 1s 帧)。 */
-    fun homeRequest(context: Context, photo: PhotoEntity, size: CoilSize? = null): ImageRequest =
+    fun homeRequest(context: Context, photo: PhotoItem, size: CoilSize? = null): ImageRequest =
         ImageRequest.Builder(context)
             .data(fileFor(context, photo.mediaId).takeIf { it.exists() } ?: Uri.parse(photo.uri))
             .apply {
@@ -65,7 +65,7 @@ object PreviewCache {
             .build()
 
     /** 确保 [photo] 的封面存在,缺失则生成。幂等(文件已在 → 立即返回)+ 单飞。 */
-    suspend fun ensure(context: Context, photo: PhotoEntity) {
+    suspend fun ensure(context: Context, photo: PhotoItem) {
         val app = context.applicationContext
         if (fileFor(app, photo.mediaId).exists()) return
         val acquired = inflightMutex.withLock { inflight.add(photo.mediaId) }
@@ -90,17 +90,17 @@ object PreviewCache {
     }
 
     /** 非挂起点(Compose 回调)用的 fire-and-forget 版本。 */
-    fun ensureAsync(context: Context, photo: PhotoEntity) {
+    fun ensureAsync(context: Context, photo: PhotoItem) {
         ioScope.launch { runCatching { ensure(context, photo) } }
     }
 
     /** 系统缩略图库:命中 MediaProvider 缓存时不解码原图,生成更快;未命中返回 null。 */
-    private fun loadViaSystemThumbnail(context: Context, photo: PhotoEntity): Bitmap? = runCatching {
+    private fun loadViaSystemThumbnail(context: Context, photo: PhotoItem): Bitmap? = runCatching {
         context.contentResolver.loadThumbnail(Uri.parse(photo.uri), Size(MAX_EDGE, MAX_EDGE), null)
     }.onFailure { Log.d(TAG, "loadThumbnail miss for ${photo.mediaId}: ${it.message}") }.getOrNull()
 
     /** 回退:Coil 解码原图(视频抽 1s 帧);allowHardware(false) 因为 JPEG 压缩需要软件位图。 */
-    private suspend fun loadViaCoil(context: Context, photo: PhotoEntity): Bitmap? = runCatching {
+    private suspend fun loadViaCoil(context: Context, photo: PhotoItem): Bitmap? = runCatching {
         val request = ImageRequest.Builder(context)
             .data(Uri.parse(photo.uri))
             .size(MAX_EDGE, MAX_EDGE)

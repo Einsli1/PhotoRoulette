@@ -41,7 +41,6 @@ import kotlinx.coroutines.launch
 import coil.size.Size as CoilSize
 import kotlin.math.roundToInt
 import com.einsli.photoroulette.MemoryInfo
-import com.einsli.photoroulette.data.PhotoEntity
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable

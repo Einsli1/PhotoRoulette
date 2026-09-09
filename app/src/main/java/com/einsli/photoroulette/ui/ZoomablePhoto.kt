@@ -33,7 +33,7 @@ import androidx.compose.ui.platform.LocalContext
 import coil.compose.AsyncImage
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
-import com.einsli.photoroulette.data.PhotoEntity
+import com.einsli.photoroulette.model.PhotoItem
 import kotlin.math.abs
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -56,7 +56,7 @@ private const val DoubleTapMillis = 250L
  */
 @Composable
 fun ZoomablePhoto(
-    photo: PhotoEntity,
+    photo: PhotoItem,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     resetTick: Int = 0,

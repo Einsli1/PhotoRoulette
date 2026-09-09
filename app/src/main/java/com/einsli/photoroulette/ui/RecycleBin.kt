@@ -56,10 +56,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
-import com.einsli.photoroulette.data.PhotoEntity
+import com.einsli.photoroulette.model.PhotoItem
 
 @OptIn(ExperimentalSharedTransitionApi::class)
-@Composable internal fun RecycleBin(items: List<PhotoEntity>, trashBytes: Long, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
+@Composable internal fun RecycleBin(items: List<PhotoItem>, trashBytes: Long, viewModel: com.einsli.photoroulette.PhotoViewModel, onRestore: (List<Long>) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var selected by remember { mutableStateOf(setOf<Long>()) }
     // 选择模式：右上垃圾桶按钮或长按照片进入，X 退出。只要有选中项也视为选择中
@@ -496,7 +496,7 @@ private fun TrashSelectionBadge(checked: Boolean, modifier: Modifier = Modifier)
 /** 4 列密铺宫格的视频角标（设计图：左下角小播放三角 + 时长，白字，无底色）。
  *  视频格才渲染；必须放在 shared element 的兄弟层，不随转场缩放。 */
 @Composable
-internal fun GridVideoBadge(photo: PhotoEntity, modifier: Modifier = Modifier) {
+internal fun GridVideoBadge(photo: PhotoItem, modifier: Modifier = Modifier) {
     if (!photo.mimeType.startsWith("video/")) return
     Box(modifier) {
         Row(

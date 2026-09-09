@@ -120,15 +120,23 @@ import com.einsli.photoroulette.PhotoViewModel
 import com.einsli.photoroulette.MemoryInfo
 import com.einsli.photoroulette.ReviewSession
 import com.einsli.photoroulette.data.AppSettings
-import com.einsli.photoroulette.data.PhotoEntity
 import com.einsli.photoroulette.data.PhotoState
+import com.einsli.photoroulette.model.PhotoItem
 
-/** Pages that hide the bottom navigation bar (immersive): Review (2), RecycleBin (3) and
- *  MemoryViewer (5) are standalone pages entered via a dedicated button. */
-private val immersivePages = setOf(2, 3, 5)
+/**
+ * 应用内路由(评审 中-5):整型魔法 int 换成 enum,分发处 when 分支由编译器保证穷尽,
+ * 新增页面漏写分支直接编译失败。历史 int 值仅作对照:0=Home 1=Settings 2=Review
+ * 3=RecycleBin 4=Stats 5=Memory(评审文档与旧日志里的编号)。enum 是 Serializable,
+ * rememberSaveable 原生支持,持久化语义与旧 int 等价。
+ */
+internal enum class Page { Home, Settings, Review, RecycleBin, Stats, Memory }
 
-/** 底部 Tab 栏的页面顺序:首页(0) / 统计(4) / 设置(1) —— pager 索引 ↔ page 值的映射。 */
-private val tabPages = listOf(0, 4, 1)
+/** Pages that hide the bottom navigation bar (immersive): Review, RecycleBin and
+ *  MemoryViewer are standalone pages entered via a dedicated button. */
+private val immersivePages = setOf(Page.Review, Page.RecycleBin, Page.Memory)
+
+/** 底部 Tab 栏的页面顺序:首页 / 统计 / 设置 —— pager 索引 ↔ page 的映射。 */
+private val tabPages = listOf(Page.Home, Page.Stats, Page.Settings)
 
 /**
  * Where a page "comes from" on the screen, used as the scale transform origin for the
@@ -137,10 +145,10 @@ private val tabPages = listOf(0, 4, 1)
  * from the upper area (设置's 回收站 row), MemoryViewer (5) from the lower part of the
  * screen (回忆时光机 card). Other pages zoom from the center.
  */
-private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
-    2 -> TransformOrigin(0.5f, 0.35f)
-    3 -> TransformOrigin(0.5f, 0.3f)
-    5 -> TransformOrigin(0.5f, 0.75f)
+private fun pageTransformOrigin(page: Page): TransformOrigin = when (page) {
+    Page.Review -> TransformOrigin(0.5f, 0.35f)
+    Page.RecycleBin -> TransformOrigin(0.5f, 0.3f)
+    Page.Memory -> TransformOrigin(0.5f, 0.75f)
     else -> TransformOrigin(0.5f, 0.5f)
 }
 
@@ -148,7 +156,7 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
     val state by viewModel.ui.collectAsStateWithLifecycle()
     // Collected at the app level so the value is already loaded when the RecycleBin opens.
     val trashItems by viewModel.trashItems.collectAsStateWithLifecycle(emptyList())
-    var page by rememberSaveable { mutableIntStateOf(if (openReviewRequest > 0) 2 else 0) }
+    var page by rememberSaveable { mutableStateOf(if (openReviewRequest > 0) Page.Review else Page.Home) }
     // ── 底部 Tab 左右滑动切换(微信式)。page 是唯一状态源,pager 只有两条方向相反的
     //    写入通路,不形成回环、不叠加第二套动画:
     //    1) 滑动:pager.currentPage 越过中线那一帧 → page = 目标 Tab(底部栏选中态随动);
@@ -213,7 +221,7 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
         if (openReviewRequest == 0) return@LaunchedEffect
         val inProgress = state.session != null && state.remaining > 0
         if (!inProgress) viewModel.startSession() else viewModel.reconcileQuietly()
-        page = 2
+        page = Page.Review
     }
     // Hoisted so the Settings scroll position survives navigating away and back.
     val settingsScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
@@ -237,10 +245,10 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
             controller.isAppearanceLightNavigationBars = !isDark
         }
     }
-    fun navigate(newPage: Int) {
+    fun navigate(newPage: Page) {
         // Snapshot the Settings scroll position before leaving so it can be restored exactly
         // (the ScrollState alone drifts because it gets clamped before layout on re-entry).
-        if (page == 1) savedSettingsScroll = settingsScroll.value
+        if (page == Page.Settings) savedSettingsScroll = settingsScroll.value
         if (page != newPage) {
             page = newPage
         }
@@ -278,17 +286,17 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
                             unselectedTextColor = dc.labelGray,
                         )
                         NavigationBarItem(
-                            selected = page == 0, onClick = { navigate(0) },
+                            selected = page == Page.Home, onClick = { navigate(Page.Home) },
                             icon = { Icon(Icons.Default.Home, null, modifier = Modifier.size(24.dp)) },
                             label = { Text("首页", fontSize = 11.sp) }, colors = itemColors
                         )
                         NavigationBarItem(
-                            selected = page == 4, onClick = { navigate(4) },
+                            selected = page == Page.Stats, onClick = { navigate(Page.Stats) },
                             icon = { Icon(Icons.Default.Info, null, modifier = Modifier.size(24.dp)) },
                             label = { Text("统计", fontSize = 11.sp) }, colors = itemColors
                         )
                         NavigationBarItem(
-                            selected = page == 1, onClick = { navigate(1) },
+                            selected = page == Page.Settings, onClick = { navigate(Page.Settings) },
                             icon = { Icon(Icons.Default.Settings, null, modifier = Modifier.size(24.dp)) },
                             label = { Text("设置", fontSize = 11.sp) }, colors = itemColors
                         )
@@ -389,20 +397,20 @@ private fun pageTransformOrigin(page: Int): TransformOrigin = when (page) {
 /** One app page. */
 @Composable
 private fun PageContent(
-    page: Int,
+    page: Page,
     state: AppUiState,
     viewModel: PhotoViewModel,
     settingsScroll: ScrollState,
     savedSettingsScroll: Int,
-    trashItems: List<PhotoEntity>,
+    trashItems: List<PhotoItem>,
     onAction: (Long, PhotoState, Int, Long) -> Boolean,
     onCommitDeletes: () -> Unit,
     onRestoreFromTrash: (List<Long>) -> Unit,
-    onNavigate: (Int) -> Unit,
+    onNavigate: (Page) -> Unit,
     onScan: () -> Unit,
 ) {
     when (page) {
-        0 -> Home(state, onStart = {
+        Page.Home -> Home(state, onStart = {
             // A session already in progress must stay untouched: reload() nulls it first and
             // rebuilds asynchronously, which makes the 今日任务 card flicker (加载中 / 暂无图片 /
             // 总数量) while the Review page zooms in. Only rebuild when there is nothing to
@@ -411,11 +419,11 @@ private fun PageContent(
             // reconcileQuietly 后台补跑;续用中的会话只走 reconcileQuietly,不打断队列。
             val inProgress = state.session != null && state.remaining > 0
             if (!inProgress) viewModel.startSession() else viewModel.reconcileQuietly()
-            onNavigate(2)
-        }, onScan = onScan, onOpenMemory = { onNavigate(5) })
-        1 -> Settings(state.settings, viewModel, scrollState = settingsScroll, savedScroll = savedSettingsScroll, openTrash = { onNavigate(3) })
-        3 -> RecycleBin(trashItems, state.stats.trashBytes, viewModel, onRestore = onRestoreFromTrash, onBack = { onNavigate(1) })
-        4 -> {
+            onNavigate(Page.Review)
+        }, onScan = onScan, onOpenMemory = { onNavigate(Page.Memory) })
+        Page.Settings -> Settings(state.settings, viewModel, scrollState = settingsScroll, savedScroll = savedSettingsScroll, openTrash = { onNavigate(Page.RecycleBin) })
+        Page.RecycleBin -> RecycleBin(trashItems, state.stats.trashBytes, viewModel, onRestore = onRestoreFromTrash, onBack = { onNavigate(Page.Settings) })
+        Page.Stats -> {
             // 历史整理:按周显示和切换,选中历史日期即查看它所在的一周。
             val historyWeek by viewModel.historyWeek.collectAsStateWithLifecycle()
             StatsScreen(
@@ -427,10 +435,10 @@ private fun PageContent(
                 monthDayCounts = viewModel::monthDayCounts,
             )
         }
-        5 -> MemoryViewer(state.stats.memory, onBack = { onNavigate(0) })
-        else -> {
+        Page.Memory -> MemoryViewer(state.stats.memory, onBack = { onNavigate(Page.Home) })
+        Page.Review -> {
             val session by viewModel.sessionFlow.collectAsStateWithLifecycle(initialValue = viewModel.sessionFlow.value)
-            Review(session, onAction, onUndo = viewModel::undo, onDone = { onCommitDeletes() }, onBack = { onNavigate(0) })
+            Review(session, onAction, onUndo = viewModel::undo, onDone = { onCommitDeletes() }, onBack = { onNavigate(Page.Home) })
         }
     }
 }

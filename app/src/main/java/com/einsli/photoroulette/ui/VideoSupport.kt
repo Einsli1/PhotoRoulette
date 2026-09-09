@@ -55,7 +55,7 @@ import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
-import com.einsli.photoroulette.data.PhotoEntity
+import com.einsli.photoroulette.model.PhotoItem
 import com.einsli.photoroulette.media.PreviewCache
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -82,7 +82,7 @@ fun formatDuration(ms: Long): String {
  * 未命中时回退原图请求,并在成功后 write-through 补写小图,下次启动即命中。
  */
 @Composable
-fun VideoAwareImage(photo: PhotoEntity, modifier: Modifier = Modifier, contentScale: ContentScale = ContentScale.Crop, thumbSize: CoilSize? = null, usePreviewFile: Boolean = false) {
+fun VideoAwareImage(photo: PhotoItem, modifier: Modifier = Modifier, contentScale: ContentScale = ContentScale.Crop, thumbSize: CoilSize? = null, usePreviewFile: Boolean = false) {
     val context = LocalContext.current
     val request = remember(photo.uri, thumbSize, usePreviewFile) {
         if (usePreviewFile) PreviewCache.homeRequest(context, photo, thumbSize)
@@ -110,7 +110,7 @@ fun VideoAwareImage(photo: PhotoEntity, modifier: Modifier = Modifier, contentSc
  * element (not inside it) so the badge doesn't zoom with the photo during transitions.
  */
 @Composable
-fun VideoBadge(photo: PhotoEntity, modifier: Modifier = Modifier, centerSize: Dp = 44.dp, textSize: Int = 12) {
+fun VideoBadge(photo: PhotoItem, modifier: Modifier = Modifier, centerSize: Dp = 44.dp, textSize: Int = 12) {
     if (!photo.mimeType.startsWith("video/")) return
     Box(modifier) {
         Box(
@@ -160,7 +160,7 @@ fun VideoBadge(photo: PhotoEntity, modifier: Modifier = Modifier, centerSize: Dp
  */
 @Composable
 fun VideoPhoto(
-    photo: PhotoEntity,
+    photo: PhotoItem,
     modifier: Modifier = Modifier,
     active: Boolean = true,
     resetTick: Int = 0,

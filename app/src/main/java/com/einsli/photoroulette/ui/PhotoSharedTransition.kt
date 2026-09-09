@@ -72,7 +72,7 @@ import coil.decode.DataSource
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
-import com.einsli.photoroulette.data.PhotoEntity
+import com.einsli.photoroulette.model.PhotoItem
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -130,7 +130,7 @@ internal fun rememberScreenPixelSize(): CoilSize {
  * bitmap instead of a blank gap while the full-screen copy decodes. Videos decode a
  * representative frame (1s in) instead of the often-black first frame.
  */
-internal fun photoThumbRequest(context: android.content.Context, photo: PhotoEntity, size: CoilSize? = null): ImageRequest =
+internal fun photoThumbRequest(context: android.content.Context, photo: PhotoItem, size: CoilSize? = null): ImageRequest =
     ImageRequest.Builder(context).data(photo.uri).apply {
         if (size != null) size(size)
         if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000)
@@ -180,7 +180,7 @@ fun PhotoSharedTransitionLayout(
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun SharedTransitionScope.SharedGridImage(
-    photo: PhotoEntity,
+    photo: PhotoItem,
     animatedRadius: Dp,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
@@ -337,9 +337,9 @@ fun SharedTransitionScope.SharedGridImage(
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun SharedTransitionScope.SharedPhotoPreview(
-    photos: List<PhotoEntity>,
+    photos: List<PhotoItem>,
     initialIndex: Int,
-    onClose: (PhotoEntity, viaSwipeDown: Boolean) -> Unit,
+    onClose: (PhotoItem, viaSwipeDown: Boolean) -> Unit,
     /** 关闭流程刚启动(requestClose,缩放回位之前)回调,携带当前照片 mediaId。调用方用它
      *  把「当前 cell 的 sharedKey 顶成 base key、其余 cell 下线」,让返回飞行的配对双方
      *  为 预览(base) ↔ 当前 cell(base)。必须在 visible 翻转之前至少一帧完成。 */
@@ -349,7 +349,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
     /** 预览 overlay 是否处于打开态（调用方用 AnimatedVisibility(visible=...) 驱动时传入）。
      *  实例常驻时（快速关闭再打开不销毁重建），active 变 true 重置本次会话状态。 */
     active: Boolean = true,
-    bottomControls: (@Composable (current: PhotoEntity) -> Unit)? = null,
+    bottomControls: (@Composable (current: PhotoItem) -> Unit)? = null,
     sourceThumbSize: CoilSize? = null,
     /** 照片铺满整块屏幕（含系统栏之下），标题和按钮浮在照片上层（回收站/回忆时光机）。
      *  标题/按钮/顶部渐变经 [renderInSharedTransitionScopeOverlay] 以更高 zIndex 提升进
@@ -365,7 +365,7 @@ fun SharedTransitionScope.SharedPhotoPreview(
     /** 回收站样式自定义头部插槽：非空时替换默认头部（关闭按钮/文件名/页码）。
      *  参数 = 当前照片 + requestClose（触发与默认关闭按钮完全相同的关闭流程）。
      *  回忆时光机不传，预览外观一个字节都不变。 */
-    customHeader: (@Composable (current: PhotoEntity, requestClose: () -> Unit) -> Unit)? = null,
+    customHeader: (@Composable (current: PhotoItem, requestClose: () -> Unit) -> Unit)? = null,
 ) {
     // Capture the list for this preview session: an in-preview restore/delete (which changes the
     // page's list) never yanks the pager out from under the exit animation. Re-key on the list

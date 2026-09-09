@@ -7,6 +7,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.einsli.photoroulette.data.*
 import com.einsli.photoroulette.media.PreviewCache
+import com.einsli.photoroulette.model.PhotoItem
+import com.einsli.photoroulette.model.toItem
+import com.einsli.photoroulette.model.toItems
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -25,11 +28,12 @@ import java.time.ZoneId
 
 data class ReviewSession(
     val sessionId: Long,
-    val queue: List<PhotoEntity>,
+    // UI 模型层(评审 中-6):会话队列对外只暴露 PhotoItem,PhotoEntity 止步于仓库边界。
+    val queue: List<PhotoItem>,
     val position: Int,
     val lastActionDir: Int = 0,
 ) {
-    val current: PhotoEntity? get() = queue.getOrNull(position)
+    val current: PhotoItem? get() = queue.getOrNull(position)
     val remaining: Int get() = (queue.size - position).coerceAtLeast(0)
 }
 
@@ -38,7 +42,7 @@ data class MemoryInfo(
     val yearsAgo: Int,
     val dateText: String,
     val count: Int,
-    val photos: List<PhotoEntity>,
+    val photos: List<PhotoItem>,
 )
 
 /** Last-7-days organizing trend plus weekly roll-up. */
@@ -100,11 +104,13 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     // The undo stack records each action's OWN direction. Negating the session's current
     // lastActionDir instead would alternate right/left across consecutive undos (5 keeps then 5
     // undos would return from 右→左→右→左), which is exactly the "左一张右一张" the user saw.
-    private class UndoEntry(val photo: PhotoEntity, val oldState: PhotoState, val dir: Int)
+    // 只记 mediaId + 动作前状态:仓库 apply 只需要这两样,不必握着整个实体。
+    private class UndoEntry(val mediaId: Long, val oldState: PhotoState, val dir: Int)
     private val undoStack = ArrayDeque<UndoEntry>()
     private val counts = combine(repository.totalCount, repository.processedCount) { total, processed -> total to processed }
     private val statsCounters = settingsRepository.statsCounters
-    val trashItems: Flow<List<PhotoEntity>> = repository.trashItems
+    // 回收站列表同样在边界上映射成 PhotoItem(评审 中-6);Room 只在表变更时发射,映射是纯转换。
+    val trashItems: Flow<List<PhotoItem>> = repository.trashItems.map { it.toItems() }
     private val homeStats = combine(
         repository.keptCount,
         repository.processedDays.map { computeStreak(it) },
@@ -234,7 +240,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
                 val restored = repository.sessionQueue(cfg)
                 AppUiState(
                     loading = false,
-                    session = ReviewSession(1L, restored.queue, restored.position),
+                    session = ReviewSession(1L, restored.queue.toItems(), restored.position),
                     total = totalDef.await(),
                     processed = processedDef.await(),
                     settings = cfg,
@@ -317,7 +323,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
             val restored = repository.sessionQueue(cfg ?: settings.value)
             if (version == buildVersion) {
                 Log.d(TAG, "reload: publishing session $version with ${restored.queue.size} photos, position=${restored.position}")
-                session.value = ReviewSession(version, restored.queue, restored.position)
+                session.value = ReviewSession(version, restored.queue.toItems(), restored.position)
                 cardShownAt = SystemClock.elapsedRealtime()
             } else {
                 Log.d(TAG, "reload: version mismatch ($version vs $buildVersion), discarding")
@@ -354,7 +360,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         val newPos = curId?.let { id -> newQueue.indexOfFirst { it.mediaId == id } }?.takeIf { it >= 0 }
             ?: cur.position.coerceAtMost(newQueue.size)
         Log.d(TAG, "resync session: ${ids.size} -> ${newQueue.size} photos, position ${cur.position} -> $newPos")
-        session.value = cur.copy(queue = newQueue, position = newPos)
+        session.value = cur.copy(queue = newQueue.toItems(), position = newPos)
         cardShownAt = SystemClock.elapsedRealtime()
         repository.savePosition(newPos, newQueue.map { it.mediaId })
     }
@@ -375,7 +381,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
             val restored = repository.sessionQueue(cfg)
             if (version == buildVersion) {
                 Log.d(TAG, "restore: publishing session $version with ${restored.queue.size} photos, position=${restored.position}")
-                session.value = ReviewSession(version, restored.queue, restored.position)
+                session.value = ReviewSession(version, restored.queue.toItems(), restored.position)
                 cardShownAt = SystemClock.elapsedRealtime()
             } else {
                 Log.d(TAG, "restore: version mismatch ($version vs $buildVersion), discarding")
@@ -432,10 +438,10 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         ghostLockUntil = 0L
         cardShownAt = now
         lastActionAt = now
-        undoStack.addLast(UndoEntry(photo, photo.state, dir))
+        undoStack.addLast(UndoEntry(photo.mediaId, photo.state, dir))
         val queueIds = cur.queue.map { it.mediaId }
         viewModelScope.launch {
-            repository.apply(photo, state)
+            repository.apply(photo.mediaId, state)
             repository.savePosition(newPos, queueIds)
             when (state) {
                 PhotoState.KEEP -> settingsRepository.updateStatsCounters(1, 0)
@@ -451,11 +457,10 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
             Log.d(TAG, "undo: empty stack, ignoring")
             return
         }
-        val photo = entry.photo
         val oldState = entry.oldState
         val cur = session.value
         if (cur == null) { Log.d(TAG, "undo: no session"); return }
-        val idx = cur.queue.indexOfFirst { it.mediaId == photo.mediaId }
+        val idx = cur.queue.indexOfFirst { it.mediaId == entry.mediaId }
         if (idx < 0) { Log.d(TAG, "undo: photo not in queue"); return }
         // lastActionDir comes from THIS action's own direction (negated), not the session's
         // current one — consecutive undos must each recall their own swipe side.
@@ -466,7 +471,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         cardShownAt = SystemClock.elapsedRealtime()
         lastActionAt = SystemClock.elapsedRealtime()
         viewModelScope.launch {
-            repository.apply(photo, oldState)
+            repository.apply(entry.mediaId, oldState)
             repository.savePosition(idx, cur.queue.map { it.mediaId })
             // Reverse this action's own counter contribution (dir: 1=keep, -1=delete).
             if (entry.dir == 1) settingsRepository.updateStatsCounters(-1, 0)
@@ -494,9 +499,10 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     /** 处理删除并继续整理:清掉存档队列后立即建下一批(刚删的这批 confirmDeleted 已标
      *  inTrash=1,建队列 SQL 本来就排除,不用等对账),对账照旧后台补跑。 */
     fun nextSession() = viewModelScope.launch { Log.d(TAG, "nextSession() starting"); repository.startNextSession(); Log.d(TAG, "nextSession() calling startSession"); startSession() }
-    suspend fun pendingDeletes() = repository.pendingDeletes()
+    // Activity 层同样只给 UI 模型(评审 中-6):回收站 URI 校验只需要 uri/mediaId。
+    suspend fun pendingDeletes(): List<PhotoItem> = repository.pendingDeletes().toItems()
     fun confirmDeleted(ids: List<Long>) = viewModelScope.launch { Log.d(TAG, "confirmDeleted(${ids.size} photos)"); repository.confirmDeleted(ids) }
-    suspend fun trashList(): List<PhotoEntity> = repository.trashList()
+    suspend fun trashList(): List<PhotoItem> = repository.trashList().toItems()
     fun restoreFromTrash(ids: List<Long>) = viewModelScope.launch {
         repository.restoreFromTrash(ids)
         settingsRepository.updateStatsCounters(0, -ids.size)
@@ -551,7 +557,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
             yearsAgo = today.year - oldestYear,
             dateText = "${date.year}年${date.monthValue}月${date.dayOfMonth}日",
             count = group.size,
-            photos = group
+            photos = group.toItems()
         )
     }
 

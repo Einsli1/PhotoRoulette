@@ -36,8 +36,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import com.einsli.photoroulette.ReviewSession
-import com.einsli.photoroulette.data.PhotoEntity
 import com.einsli.photoroulette.data.PhotoState
+import com.einsli.photoroulette.model.PhotoItem
 
 @Composable internal fun Review(session: ReviewSession?, onAction: (Long, PhotoState, Int, Long) -> Boolean, onUndo: () -> Unit, onDone: () -> Unit, onBack: () -> Unit) {
     // 离开整理页前先把状态栏恢复（chrome 隐藏时状态栏也藏了；若等到分支销毁才恢复，
@@ -156,7 +156,7 @@ private fun formatTaken(taken: Long): String =
     var dragY by remember { mutableFloatStateOf(0f) }
     // The photo currently flying out after an accepted swipe. Kept separate from the current
     // photo so it keeps animating off-screen after the session advances to the next one.
-    var flyingPhoto by remember { mutableStateOf<PhotoEntity?>(null) }
+    var flyingPhoto by remember { mutableStateOf<PhotoItem?>(null) }
     var flyingX by remember { mutableFloatStateOf(0f) }
     var flyingY by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()

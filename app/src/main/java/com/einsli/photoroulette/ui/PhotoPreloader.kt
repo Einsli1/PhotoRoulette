@@ -12,7 +12,7 @@ import coil.request.Disposable
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
-import com.einsli.photoroulette.data.PhotoEntity
+import com.einsli.photoroulette.model.PhotoItem
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -33,7 +33,7 @@ internal const val GRID_PRELOAD_SETTLE_DEBOUNCE_MS = 150L
  * 可见格子自身仍由组合期的 cell 请求负责（滑出即取消），这里的窗口只负责「附近的余量」。
  */
 @Composable
-internal fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<PhotoEntity>, size: CoilSize) {
+internal fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List<PhotoItem>, size: CoilSize) {
     val context = LocalContext.current
     val loader = remember(context) { context.imageLoader }
     LaunchedEffect(gridState, photos, size) {

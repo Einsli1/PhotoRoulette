@@ -114,7 +114,8 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
     suspend fun savePosition(position: Int, queueIds: List<Long>) = settings.saveQueue(queueIds, position)
     /** 会话队列原位重算用:按 id 取仍然存在的行(gone=0),顺序由调用方自己保持。 */
     suspend fun liveQueuePhotos(ids: List<Long>): List<PhotoEntity> = dao.byIds(ids)
-    suspend fun apply(photo: PhotoEntity, state: PhotoState) = dao.updateState(photo.mediaId, state, if (state == PhotoState.SKIP) null else System.currentTimeMillis())
+    /** 应用动作:只需 mediaId + 目标状态(调用方持 UI 模型,不再把实体传回数据层)。 */
+    suspend fun apply(mediaId: Long, state: PhotoState) = dao.updateState(mediaId, state, if (state == PhotoState.SKIP) null else System.currentTimeMillis())
     suspend fun startNextSession() = settings.clearQueue()
     suspend fun pendingDeletes(): List<PhotoEntity> = dao.pendingDeletes()
     suspend fun confirmDeleted(ids: List<Long>) = dao.confirmDeleted(ids)

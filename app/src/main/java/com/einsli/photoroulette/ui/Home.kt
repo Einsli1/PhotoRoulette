@@ -29,7 +29,7 @@ import androidx.compose.ui.unit.sp
 import com.einsli.photoroulette.AppUiState
 import com.einsli.photoroulette.BuildConfig
 import com.einsli.photoroulette.R
-import com.einsli.photoroulette.data.PhotoEntity
+import com.einsli.photoroulette.model.PhotoItem
 import kotlin.math.roundToInt
 
 /**
@@ -129,7 +129,7 @@ private fun TodayTaskCard(state: AppUiState, onStart: () -> Unit, onScan: () -> 
     // Mid-session the preview shows the photo the user is CURRENTLY on (the queue advances as
     // they organize, so exiting halfway and returning shows where they left off); when no
     // session is in progress, fall back to the first of the group.
-    val preview: PhotoEntity? = session?.current ?: session?.queue?.firstOrNull()
+    val preview: PhotoItem? = session?.current ?: session?.queue?.firstOrNull()
     val gradient = if (dc.isDark) {
         Brush.verticalGradient(listOf(Color(0xFF27949B), Color(0xFF205F5E)))
     } else {
