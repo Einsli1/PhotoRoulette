@@ -80,7 +80,13 @@ internal fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightP
     val info = gridState.layoutInfo
     val total = info.totalItemsCount.coerceAtLeast(1)
     val visible = info.visibleItemsInfo
-    val first = visible.firstOrNull()?.index ?: 0
+    // 行起点必须与下面的 firstVisibleItemScrollOffset 同源：两者都取滚动位置状态
+    // （LazyGridState 的 firstVisibleItemIndex / firstVisibleItemScrollOffset 属于同一份
+    // scrollPosition，换行时索引推进与偏移回绕同帧原子完成，分子全程连续）。不能拿
+    // visibleItemsInfo（上一帧 measure 的布局，滚动时恒慢一帧）的 first 去拼当前 offset：
+    // 行交接那一帧状态已把锚点推进到新行、偏移已回绕，而布局仍是旧行，分子会凭空少一整
+    // 行高 → 药丸每滚过一行就下跳一截、下一帧布局追上又弹回，即「每滑动一格抖一下」。
+    val first = gridState.firstVisibleItemIndex
     val span = ((visible.lastOrNull()?.index ?: first) - first + 1).coerceAtLeast(1)
     val denom = (total - span).coerceAtLeast(1)
     // 行空间连续比例 = 当前滚动像素 / 可滚动行程（denom 格 ÷ 每行 4 格 × 行高）。
@@ -114,7 +120,10 @@ internal fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightP
                             val travel = (areaHeightPx - pillH).coerceAtLeast(0f)
                             val li = gridState.layoutInfo
                             val vis = li.visibleItemsInfo
-                            val f0 = vis.firstOrNull()?.index ?: 0
+                            // 与显示路径同一约定：行起点取滚动位置状态（与下面现读的
+                            // firstVisibleItemScrollOffset 同源、同帧一致），不取布局的
+                            // visibleItemsInfo.first()（滚动中恒慢一帧，行交接会配错行）。
+                            val f0 = gridState.firstVisibleItemIndex
                             val l0 = vis.lastOrNull()?.index ?: f0
                             // den/maxScrollPx 在 down 时快照、整个手势内复用。分母绝不能在 move
                             // 里随「滚动结果」重读：新行从底边进入 → 可见数变 → 目标被回拉 →
