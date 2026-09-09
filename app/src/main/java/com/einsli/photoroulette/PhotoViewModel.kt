@@ -111,11 +111,14 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
     private val statsCounters = settingsRepository.statsCounters
     // 回收站列表同样在边界上映射成 PhotoItem(评审 中-6);Room 只在表变更时发射,映射是纯转换。
     val trashItems: Flow<List<PhotoItem>> = repository.trashItems.map { it.toItems() }
+    // 回忆候选同样在边界映射成 PhotoItem(评审 中-6)——buildMemory 只读 dateTaken,
+    // 映射是纯转换,Entity 止步于 ViewModel 私有函数之外,与 trashItems 规则一致。
+    private val memoryCandidatesItems: Flow<List<PhotoItem>> = repository.memoryCandidates.map { it.toItems() }
     private val homeStats = combine(
         repository.keptCount,
         repository.processedDays.map { computeStreak(it) },
         repository.trashBytes,
-        repository.memoryCandidates.map { buildMemory(it) }
+        memoryCandidatesItems.map { buildMemory(it) }
     ) { kept, streak, bytes, memory ->
         HomeStats(kept, streak, bytes, memory)
     }
@@ -133,7 +136,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         }
         // 回忆封面:memory 按 dateTaken 确定性查询,只在跨天/重扫后变化;每次变化补 take(2)。
         viewModelScope.launch {
-            repository.memoryCandidates
+            memoryCandidatesItems
                 .map { buildMemory(it) }
                 .distinctUntilChanged()
                 .collect { memory ->
@@ -231,7 +234,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
             val keptDef = async(Dispatchers.IO) { repository.keptCount.first() }
             val daysDef = async(Dispatchers.IO) { repository.processedDays.first() }
             val bytesDef = async(Dispatchers.IO) { repository.trashBytes.first() }
-            val memoryDef = async(Dispatchers.IO) { buildMemory(repository.memoryCandidates.first()) }
+            val memoryDef = async(Dispatchers.IO) { buildMemory(memoryCandidatesItems.first()) }
             val weekDef = async(Dispatchers.IO) { weekStatsFlow(LocalDate.now().with(DayOfWeek.MONDAY)).first() }
             val cumulativeDef = async(Dispatchers.IO) { settingsRepository.statsCounters.first() }
             withContext(Dispatchers.IO) {
@@ -540,8 +543,9 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         return streak
     }
 
-    /** Oldest group of photos taken on today's month/day in a past year → "N年前的今天". */
-    private fun buildMemory(candidates: List<PhotoEntity>): MemoryInfo? {
+    /** Oldest group of photos taken on today's month/day in a past year → "N年前的今天".
+     *  候选在边界已映射成 PhotoItem（[memoryCandidatesItems]），这里只按 dateTaken 分组挑选。 */
+    private fun buildMemory(candidates: List<PhotoItem>): MemoryInfo? {
         if (candidates.isEmpty()) return null
         val zone = ZoneId.systemDefault()
         val today = LocalDate.now()
@@ -557,7 +561,7 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
             yearsAgo = today.year - oldestYear,
             dateText = "${date.year}年${date.monthValue}月${date.dayOfMonth}日",
             count = group.size,
-            photos = group.toItems()
+            photos = group
         )
     }
 
