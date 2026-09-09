@@ -6,18 +6,19 @@
 
 ---
 
-## ✅ 重构进度（2026-09-08 起，refactor/architecture-review 已合回 master；2026-09-09 更新：ee4201 完成任务 1–3；最新：MediaGridScreen 去重完成，中-5 全部落地）
+## ✅ 重构进度（2026-09-08 起，refactor/architecture-review 已合回 master；2026-09-09 更新：ee4201 完成任务 1–3；最新：MediaGridScreen 去重完成（中-5 全落地）、高-4 通知权限提示、低-19 视频轮询优化）
 
 - **高-2 主线程 IO**：已修——movePendingToTrash/restoreFromSystemTrash 的 URI 校验循环移入 `withContext(Dispatchers.IO)`。
 - **高-3 迁移即清库**：已修——`exportSchema` 开启（`app/schemas/6.json`、`7.json` 入库）；version 7 显式迁移补 4 个索引（state/inTrash/dateTaken/album）；无条件破坏性回退改为仅 v1/v2 兜底；`MigrationTest` 迁移测试已上真机跑通 6→7。
+- **高-4 静默失败 UI 信号**：部分完成——通知权限被拒的降级提示已做：设置页「每日提醒」卡片内新增「开启通知提醒」提示行（与精确闹钟提示行同款：权限未授时显示、点击跳系统通知设置页 `ACTION_APP_NOTIFICATION_SETTINGS`、onResume 自动刷新）；**仍待产品设计**：扫描失败返回空表（`MediaScanner.kt:45,138`）与 reconcile 异常仅记日志（`PhotoViewModel.kt:319-320,344-345`）的 UI 信号。
 - **中-5 App.kt god file**：已完成——回收站/回忆/整理/设置四屏与预载引擎、滚动条已拆独立文件（App.kt 2195→465 行），对外接缝与行为零变化；路由魔法 int 已改 `Page` enum（ee4201：`when` 分发由编译器保证穷尽、enum 为 Serializable 可直接进 `rememberSaveable`，新增页面漏写分支直接编译失败）；最后一块 **MediaGridScreen 去重**（RecycleBin↔MemoryViewer 约 85% 重复）已完成——新增 `ui/MediaGridScreen.kt` 共享宫格页骨架（预览状态机/SpringPull 弹性宫格/渐变悬浮头/选择模式/预览 overlay），RecycleBin.kt 570→106 行、MemoryViewer.kt 260→45 行，两页差异收敛为参数 + 插槽（配色/留白/解码比例/滚动条/头部/预览头/`MediaGridSelection` 选择动作）。
-- **中-6 实体直漏 UI**：已修（ee4201）——新增 `model/PhotoItem.kt` UI 模型（mediaId/uri/displayName/dateTaken/mimeType/duration/state 最小集，UI 需要时再按需加字段）；Repository 的 Room Flow 在 ViewModel 边界经 `toItem()/toItems()` 映射：trashItems、会话队列（`ReviewSession.queue`）、pendingDeletes/trashList、memoryCandidates（buildMemory）全部改吐 `PhotoItem`，`ui/` 各 Composable 与 MainActivity 已零 `PhotoEntity` 引用（现仅存于 data/media 层与 ViewModel 私有映射处）。
+- **中-6 实体直漏 UI**：已修（ee4201）——新增 `model/PhotoItem.kt` UI 模型（mediaId/uri/displayName/dateTaken/mimeType/duration/state 最小集，UI 需要时再按需加字段）；Repository 的 Room Flow 在 ViewModel 边界经 `toItem()/toItems()` 映射：trashItems、会话队列（`ReviewSession.queue`）、pendingDeletes/trashList、memoryCandidates（buildMemory）全部改吐 `PhotoItem`，`ui/` 各 Composable 与 MainActivity 已零 `PhotoEntity` 引用（现仅存于 data/media 层与映射函数处，ViewModel 内部零 Entity 引用）。
 - **中-7 Room 细节**：索引与 `@Transaction`（DAO default 方法 `applyScan`/`applyReconcile`，慢 IO 留在事务外）已做；SQL 双份（trashItems/trashNow 等）按务实处理紧邻放置并加同步注释，未消除双份。
 - **中-8 手写 DI 分散**：已修——`AppContainer` 挂在 Application 上统一组装 database/settings/mediaScanner/repository；ReminderScheduler 经容器取 SettingsRepository，守卫/降级语义逐字未动。
 - **中-9 一致性小坑**：restoreFromTrash「丢 FAVORITE」查证为不可达路径（FAVORITE 全工程无写入，已加注释）；weekStats 跨周不刷新已修（冷流按日重算周一）；save→ReminderScheduler 耦合刻意保留（真机时序竞态，见代码注释）；相册规则已单一来源（坑 23 修净，本轮复核确认）。
 - **中-10 重复代码**：formatBytes 三份归一为 `Format.kt/formatCapacity`；进度卡/StatItem≈BigStat/placeholder 淡入经逐对 diff 均有实质差异（圆角、字号、动画方向等），按「宁缺毋滥」维持现状；SwipePhoto 手写缓动三份随拆分原样搬入 Review.kt，未去重。
-- **低优先级**：O(n²) `it !in valid` 已修（mediaId HashSet）；PhotoAspectCache 改 `LruCache(512)`；dynamicColor 误导参数已文档化（调用方在 App.kt，行为不动）；kapt→KSP（1.9.25-1.0.20）；未使用的 navigation-compose 依赖已删；tmp_shared_src 已移出版本控制（磁盘保留）；README 已校正（7af8ae1）。
-- **未做**：高-4 静默失败 UI 信号（需产品设计）；低-19 VideoPhoto 轮询优化。
+- **低优先级**：O(n²) `it !in valid` 已修（mediaId HashSet）；PhotoAspectCache 改 `LruCache(512)`；dynamicColor 误导参数已文档化（调用方在 App.kt，行为不动）；kapt→KSP（1.9.25-1.0.20）；未使用的 navigation-compose 依赖已删；tmp_shared_src 已移出版本控制（磁盘保留）；README 已校正（7af8ae1）；**低-19 VideoPhoto 轮询优化已修**——控制条拆独立组件 `VideoControlsBar`（250ms 轮询只重组控制条自身，不再波及播放器/静态帧/触摸层），拖动进度只在松手时 seekTo 一次（消除逐帧 seekTo），拖动中显示本地进度不抖。
+- **未做**：高-4 剩余两点（扫描失败空表、reconcile 失败日志的 UI 信号，均需产品设计）。
 
 ---
 
@@ -71,8 +72,9 @@ AlarmManager ←──(save 副作用)────────────┘   
    （`MainActivity.kt:113-128, 153-161`），批量操作会卡 UI；建议移入 `withContext(Dispatchers.IO)`。
 3. **迁移即清库**：`exportSchema=false`（`PhotoDatabase.kt:10`）+ `fallbackToDestructiveMigration`（:39）——
    漏写一条迁移就静默清掉全部历史统计，与「统计页是核心卖点」矛盾。建议开 exportSchema + 迁移测试。
-4. **静默失败面大**：扫描失败返回空表无 UI 信号（`MediaScanner.kt:45,138`）、reconcile 异常仅记日志
+4. **静默失败面大（部分已修）**：扫描失败返回空表无 UI 信号（`MediaScanner.kt:45,138`）、reconcile 异常仅记日志
    （`PhotoViewModel.kt:296-298`）、通知权限被拒时 `postNotification` 无降级提示（`ReminderScheduler.kt:119-137`）。
+   ——通知权限降级提示已做（设置页「开启通知提醒」提示行，同精确闹钟样式，见顶部进度）；扫描/reconcile 两点仍待产品设计。
 
 ### 中（可维护性/性能）
 
@@ -108,7 +110,7 @@ AlarmManager ←──(save 副作用)────────────┘   
 16. 声明未用的 `navigation-compose` 依赖（`app/build.gradle.kts:39`，导航实为自研）。
 17. `tmp_shared_src/` 参考源码混在仓库根目录，应移出或 ignore。
 18. README 漂移：仍写「WorkManager 每日提醒调度器」，实际为 AlarmManager 方案。
-19. VideoPhoto 每 250ms 轮询 positionMs 触发重组、Slider 逐帧 seekTo（`VideoSupport.kt:249-255, 383-385`，推测有卡顿风险）。
+19. VideoPhoto 每 250ms 轮询 positionMs 触发重组、Slider 逐帧 seekTo（`VideoSupport.kt:249-255, 383-385`，推测有卡顿风险）——已修：控制条拆独立组件 + 松手才 seekTo（见顶部进度）。
 
 ## 五、突出亮点
 

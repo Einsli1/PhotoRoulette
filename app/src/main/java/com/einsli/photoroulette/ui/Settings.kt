@@ -1,8 +1,10 @@
 package com.einsli.photoroulette.ui
 
 // 设置页（Settings）：外观/数量/提醒/范围/策略/内容等设置项、行组件与相册选择弹窗（AlbumsPicker）。
+import android.Manifest
 import android.app.AlarmManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.animation.core.animateFloatAsState
@@ -27,6 +29,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -126,6 +129,30 @@ import com.einsli.photoroulette.data.AppSettings
                     Column(Modifier.weight(1f)) {
                         Text("提醒精确到分钟", fontSize = 14.sp, color = dc.ink)
                         Text("未授权时提醒可能延迟,点击去系统设置开启", fontSize = 11.sp, color = dc.labelGray)
+                    }
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = dc.labelGray, modifier = Modifier.size(18.dp))
+                }
+            }
+            // POST_NOTIFICATIONS 在 Android 13+ 需用户授予;被拒时到点通知静默不发(notify 不报错)。
+            // 同款提示行:点这行进系统通知设置开启,回来(onResume)后自动生效。
+            val notificationsEnabled = runCatching {
+                ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            }.getOrDefault(true)
+            if (!notificationsEnabled) {
+                HorizontalDivider(color = dc.track.copy(alpha = 0.6f))
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable {
+                        runCatching {
+                            ctx.startActivity(
+                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                            )
+                        }
+                    }.padding(vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("开启通知提醒", fontSize = 14.sp, color = dc.ink)
+                        Text("未授权时到点收不到提醒,点击去系统设置开启", fontSize = 11.sp, color = dc.labelGray)
                     }
                     Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = dc.labelGray, modifier = Modifier.size(18.dp))
                 }

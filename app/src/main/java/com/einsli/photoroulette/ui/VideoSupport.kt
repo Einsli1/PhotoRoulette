@@ -344,61 +344,105 @@ fun VideoPhoto(
                 }
         )
         if (prepared && !staticFrame) {
-            Row(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .padding(bottom = bottomInset)
-                    .graphicsLayer { translationY = chromeProgress * chromeExitPx }
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Icon(
-                    if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    contentDescription = if (isPlaying) "暂停" else "播放",
-                    tint = Color.White,
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .pointerInput(photo.mediaId) {
-                            detectTapGestures(onTap = {
-                                val vv = videoView ?: return@detectTapGestures
-                                if (vv.isPlaying) {
-                                    vv.pause()
-                                    isPlaying = false
-                                } else {
-                                    vv.start()
-                                    isPlaying = true
-                                }
-                            })
-                        },
-                )
-                val maxDur = durationMs.coerceAtLeast(1L).toFloat()
-                Slider(
-                    value = positionMs.toFloat().coerceIn(0f, maxDur),
-                    onValueChange = { target ->
-                        positionMs = target.toLong()
-                        videoView?.seekTo(target.toInt())
-                    },
-                    valueRange = 0f..maxDur,
-                    modifier = Modifier.weight(1f).height(28.dp),
-                    colors = SliderDefaults.colors(
-                        thumbColor = Color.White,
-                        activeTrackColor = Color.White,
-                        inactiveTrackColor = Color.White.copy(alpha = 0.3f),
-                    ),
-                )
-                Text(
-                    "${formatDuration(positionMs)} / ${formatDuration(durationMs)}",
-                    color = Color.White.copy(alpha = 0.9f),
-                    style = MaterialTheme.typography.labelSmall,
-                    textAlign = TextAlign.End,
-                )
-            }
+            // 控制条独立成组件(低-19):轮询 positionMs 每 250ms 只重组控制条自身,
+            // 不再波及播放器/静态帧/触摸层;拖动进度只在松手时 seekTo 一次。
+            VideoControlsBar(
+                modifier = Modifier.align(Alignment.BottomCenter),
+                videoView = videoView,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                isPlaying = isPlaying,
+                bottomInset = bottomInset,
+                chromeProgress = chromeProgress,
+                chromeExitPx = chromeExitPx,
+                onTogglePlay = {
+                    videoView?.let { vv ->
+                        if (vv.isPlaying) {
+                            vv.pause()
+                            isPlaying = false
+                        } else {
+                            vv.start()
+                            isPlaying = true
+                        }
+                    }
+                },
+                onSeek = { pos ->
+                    positionMs = pos
+                    videoView?.seekTo(pos.toInt())
+                },
+            )
         }
+    }
+}
+
+/**
+ * 全屏预览的视频控制条（播放/暂停、进度 Slider、时间标签）。
+ * 独立成组件的原因（低-19）：positionMs 每 250ms 轮询更新一次,重组只发生在这个
+ * 控制条内部——播放器/静态帧/触摸层不再跟着重跑;进度拖动只在松手
+ * (onValueChangeFinished) 时经 [onSeek] seekTo 一次,拖动过程中只更新时间预览,
+ * 消除逐帧 seekTo 的卡顿风险。
+ */
+@Composable
+private fun VideoControlsBar(
+    modifier: Modifier = Modifier,
+    videoView: VideoView?,
+    positionMs: Long,
+    durationMs: Long,
+    isPlaying: Boolean,
+    bottomInset: Dp,
+    chromeProgress: Float,
+    chromeExitPx: Float,
+    onTogglePlay: () -> Unit,
+    onSeek: (Long) -> Unit,
+) {
+    // 拖动中的本地进度:>=0 表示正在拖动,Slider 显示它而非轮询的 positionMs(拖动不抖);
+    // 松手时经 onSeek 回写并 seekTo 一次,然后复位。
+    var dragMs by remember { mutableLongStateOf(-1L) }
+    val maxDur = durationMs.coerceAtLeast(1L).toFloat()
+    Row(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .padding(bottom = bottomInset)
+            .graphicsLayer { translationY = chromeProgress * chromeExitPx }
+            .clip(RoundedCornerShape(22.dp))
+            .background(Color.Black.copy(alpha = 0.6f))
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+            contentDescription = if (isPlaying) "暂停" else "播放",
+            tint = Color.White,
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { onTogglePlay() })
+                },
+        )
+        Slider(
+            value = (if (dragMs >= 0) dragMs else positionMs).toFloat().coerceIn(0f, maxDur),
+            onValueChange = { dragMs = it.toLong() },
+            onValueChangeFinished = {
+                val target = dragMs
+                dragMs = -1
+                if (target >= 0) onSeek(target)
+            },
+            valueRange = 0f..maxDur,
+            modifier = Modifier.weight(1f).height(28.dp),
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color.White,
+                inactiveTrackColor = Color.White.copy(alpha = 0.3f),
+            ),
+        )
+        Text(
+            "${formatDuration(if (dragMs >= 0) dragMs else positionMs)} / ${formatDuration(durationMs)}",
+            color = Color.White.copy(alpha = 0.9f),
+            style = MaterialTheme.typography.labelSmall,
+            textAlign = TextAlign.End,
+        )
     }
 }
