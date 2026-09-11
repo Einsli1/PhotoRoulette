@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -177,6 +178,11 @@ internal fun MediaGridScreen(
         }
     }
     val gridState = rememberLazyGridState()
+    // 悬浮头部的实测高度（= statusBarTop + 头部内容 + headerBottomPadding，也就是头部那条
+    // 「整层吞触碰」的吸收层高度）：滚动条轨道上端从它下沿开始，否则药丸滑到最顶上时整颗
+    // 埋在头部渐变最深处、又落在吸收层里——看得见抓不到（真机反馈）。实测而不是按
+    // statusBarTop + 56dp + headerBottomPadding 算：头部内容是页面插槽，高度由页面决定。
+    var headerHeightPx by remember { mutableIntStateOf(0) }
     // 页面头部悬浮+顶部渐变后内容延伸到状态栏之下：状态栏图标强制白色（无论 App 主题），
     // 离开页面恢复。
     val activity = LocalContext.current as? android.app.Activity
@@ -349,6 +355,7 @@ internal fun MediaGridScreen(
                                     GridScrollBar(
                                         gridState, photos.size, gridRowPx,
                                         interactive = !selecting,
+                                        trackTopInset = with(density) { headerHeightPx.toDp() },
                                         modifier = Modifier.align(Alignment.CenterEnd),
                                     )
                                 }
@@ -362,6 +369,8 @@ internal fun MediaGridScreen(
                     Box(
                         Modifier
                             .fillMaxWidth()
+                            // 头部实测高度 → 滚动条轨道上端（见 headerHeightPx 的注释）。
+                            .onSizeChanged { headerHeightPx = it.height }
                             .background(
                                 Brush.verticalGradient(
                                     0f to Color.Black.copy(alpha = 0.9f),

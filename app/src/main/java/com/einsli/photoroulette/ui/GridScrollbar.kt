@@ -36,6 +36,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Job
@@ -52,11 +53,23 @@ import kotlin.math.roundToInt
  *  药丸位置 = 已滚像素 ÷ 可滚行程，两者都按像素连续取（见 [remainingScrollPx]），所以
  *  滚动中不会整行跳变。宫格没什么可滚时（张数过少，或实测行程不足一行）整条不显示。
  *
+ *  [trackTopInset] = 轨道上端内缩（调用方传页面悬浮头部的实测高度）。头部是一条「整层
+ *  吞触碰」的满宽层（见 MediaGridScreen 的头部 Box），轨道若不内缩，药丸滑到最顶上时整颗
+ *  压在头部渐变最深处、又落在吸收层里——看得见、抓不到。内缩到头部下沿后，药丸的最上位
+ *  正好落在第一排宫格上，也永远不在头部的地盘里。
+ *
  *  手势层随可见性挂载：淡出后（shown=false 且未在拖动）或 [interactive]=false（选择模式）
  *  时不挂 pointerInput——满高透明条只要挂着手势层，命中测试就命中最上层的它，被盖住的
  *  宫格收不到触碰（处理器里放行不消费也无效），右列照片/选择圈就会点不了。 */
 @Composable
-internal fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightPx: Int, interactive: Boolean = true, modifier: Modifier = Modifier) {
+internal fun GridScrollBar(
+    gridState: LazyGridState,
+    totalItems: Int,
+    rowHeightPx: Int,
+    interactive: Boolean = true,
+    trackTopInset: Dp = 0.dp,
+    modifier: Modifier = Modifier,
+) {
     if (totalItems < 24) return
     val scope = rememberCoroutineScope()
     // 滚动或拖动即出现；两者都停止 2 秒后淡出（淡出期间新滚动立即重现）。
@@ -113,6 +126,10 @@ internal fun GridScrollBar(gridState: LazyGridState, totalItems: Int, rowHeightP
         modifier
             .fillMaxHeight()
             .width(44.dp)
+            // 轨道上端内缩到悬浮头部下沿：内缩是在 fillMaxHeight 之内做的，所以
+            // onSizeChanged / pointerInput 拿到的 size 就是缩后的轨道，药丸偏移以它顶为 0，
+            // 底层坐标不用改（travelPx 也自动变成缩后的行程）。
+            .padding(top = trackTopInset)
             .onSizeChanged { areaHeightPx = it.height }
             // 热区必须「整层存在或整层不存在」：只要这条满高透明条上挂着 pointerInput，
             // 命中测试就命中最上层的它，被盖住的宫格整条收不到触碰——在处理器里对未命中
