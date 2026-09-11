@@ -15,6 +15,7 @@ captures/
 .cxx/
 *.hprof
 install_debug.ps1
+install_release.ps1
 push_release.ps1
 gen_icons.ps1
 *.png
