@@ -355,7 +355,21 @@ internal fun MediaGridScreen(
                                     GridScrollBar(
                                         gridState, photos.size, gridRowPx,
                                         interactive = !selecting,
-                                        trackTopInset = with(density) { headerHeightPx.toDp() },
+                                        // 轨道上端 = 悬浮头部「吸收层」的下沿 = 第一排宫格顶边
+                                        // （+ 8dp 余量让药丸不贴着照片边）。
+                                        // 必须减掉 headerBottomPadding：headerHeightPx 实测的是
+                                        // 整个头部 Box（含 headerBottomPadding —— 那是渐变向下
+                                        // 延伸的距离，只是画在宫格上的一层透明渐变，不是头部实际
+                                        // 占位）；吸收层是 .padding() 之后那个 pointerInput 节点，
+                                        // 高度 = headerHeightPx − headerBottomPadding，下沿正好落在
+                                        // 宫格第一排顶边。不减的话药丸最上位停在第一排顶边往下
+                                        // 56dp 处（真机实测：药丸顶 483px vs 第一排顶 310px）。
+                                        // coerceAtLeast(0.dp) 不能省：首帧 headerHeightPx 还是 0，
+                                        // 0 − 56dp + 8dp 会算出负 padding，
+                                        // `.padding()` 直接抛 IllegalArgumentException 崩页
+                                        // （2026-09-11 真机：进回收站闪退）。
+                                        trackTopInset = (with(density) { headerHeightPx.toDp() } -
+                                            headerBottomPadding + 8.dp).coerceAtLeast(0.dp),
                                         modifier = Modifier.align(Alignment.CenterEnd),
                                     )
                                 }
