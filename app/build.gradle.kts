@@ -14,8 +14,8 @@ android {
         applicationId = "com.einsli.photoroulette"
         minSdk = 36
         targetSdk = 36
-        versionCode = 15
-        versionName = "1.7"
+        versionCode = 16
+        versionName = "1.8"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     // MigrationTestHelper 从 androidTest assets 里读导出的 schema(app/schemas 已作为 assets
