@@ -1,5 +1,6 @@
 package com.einsli.photoroulette.ui
 
+import android.media.MediaPlayer
 import android.net.Uri
 import android.widget.VideoView
 import androidx.compose.animation.core.animateFloatAsState
@@ -57,7 +58,9 @@ import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
 import com.einsli.photoroulette.model.PhotoItem
 import com.einsli.photoroulette.media.PreviewCache
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 
 /** "1:23" / "1:02:03" — used by the duration pill and the player's time labels. */
@@ -210,10 +213,29 @@ fun VideoPhoto(
     val cropRatio = aspect?.let { cropToFitRatio(it) } ?: 1f
     val cropFitScale = 1f + (cropRatio - 1f) * (1f - cropFitProgress)
 
+    // ── 拖动进度条的实时画面预览 ──────────────────────────────────────────────
+    // 以前只有松手时 seekTo 一次，拖动过程中画面不动（只有时间文字在变）。改成拖动中跟着
+    // 手指走：
+    //  · 目标位置走 conflated channel —— 手指每动一下只保留最新目标，中间位置自动丢弃，
+    //    不会排成一长串过期的 seek；
+    //  · worker 一次只发一个 seekTo，并等 OnSeekCompleteListener 回来才取下一个目标。解码器
+    //    吃不下时自然降级成「跟得上多少显示多少」，同时保证同一时刻只有一个 seek 在飞
+    //    （不这样限流会被指针事件按 120Hz 灌满，每个 seek 都在解码器里被取消重来）。
+    //  · 250ms 兜底超时：某次回调丢了也不能让队列永久卡死（等待必须有出口，见 AGENTS.md 坑 26）。
+    val scrubTargets = remember(photo.mediaId) { Channel<Long>(Channel.CONFLATED) }
+    val seekDone = remember(photo.mediaId) { Channel<Unit>(Channel.CONFLATED) }
+    // 帧精确 seek 必须走 MediaPlayer：VideoView 只有 seekTo(int)，那等价于 SEEK_PREVIOUS_SYNC
+    // （只跳到关键帧；手机视频关键帧间隔常 1~2s，拖起来画面会一格一格地蹦）。带 mode 的
+    // seekTo(long, int) 只有 MediaPlayer 上有，所以在 onPrepared 里把它存下来直接用。
+    var mediaPlayer by remember(photo.mediaId) { mutableStateOf<MediaPlayer?>(null) }
+
     LaunchedEffect(photo.mediaId, videoView) {
         val vv = videoView ?: return@LaunchedEffect
         vv.setVideoURI(Uri.parse(photo.uri))
         vv.setOnPreparedListener { mp ->
+            mediaPlayer = mp
+            // 拖动预览的节流信号：worker 发一次 seekTo 就等这里回来，回来才取下一个目标。
+            mp.setOnSeekCompleteListener { seekDone.trySend(Unit) }
             durationMs = mp.duration.toLong().coerceAtLeast(0L)
             prepared = true
             if (active) {
@@ -253,6 +275,21 @@ fun VideoPhoto(
             delay(250)
         }
     }
+
+    // 拖动预览的 seek worker（scrubTargets / seekDone / mediaPlayer 声明见上面
+    // 「拖动进度条的实时画面预览」）。以 mediaPlayer 为 key：拿到播放器才起循环。
+    LaunchedEffect(photo.mediaId, mediaPlayer) {
+        val mp = mediaPlayer ?: return@LaunchedEffect
+        for (pos in scrubTargets) {
+            // 丢掉上一次超时残留的信号，否则这一次会「秒过」、白拿一次不节流的 seek。
+            while (seekDone.tryReceive().isSuccess) { }
+            runCatching { mp.seekTo(pos, MediaPlayer.SEEK_CLOSEST) }
+            withTimeoutOrNull(250) { seekDone.receive() }
+        }
+    }
+    // 拖动期间暂停播放：不停的话播放头一边被拖一边自己往前走，画面既跟不准也发飘。
+    // 松手后按拖动前的状态恢复。
+    var resumeAfterScrub by remember(photo.mediaId) { mutableStateOf(false) }
 
     // Closing the preview, swapping back to the static flight frame (player unmounts), or the
     // pager page leaving composition stops playback immediately.
@@ -345,10 +382,10 @@ fun VideoPhoto(
         )
         if (prepared && !staticFrame) {
             // 控制条独立成组件(低-19):轮询 positionMs 每 250ms 只重组控制条自身,
-            // 不再波及播放器/静态帧/触摸层;拖动进度只在松手时 seekTo 一次。
+            // 不再波及播放器/静态帧/触摸层。进度拖动中实时 seekTo 出画面（目标走 conflated
+            // channel + OnSeekComplete 节流，见上面 scrubTargets 的注释）。
             VideoControlsBar(
                 modifier = Modifier.align(Alignment.BottomCenter),
-                videoView = videoView,
                 positionMs = positionMs,
                 durationMs = durationMs,
                 isPlaying = isPlaying,
@@ -366,9 +403,21 @@ fun VideoPhoto(
                         }
                     }
                 },
-                onSeek = { pos ->
+                onScrubStart = {
+                    val vv = videoView
+                    resumeAfterScrub = vv?.isPlaying == true
+                    if (resumeAfterScrub) runCatching { vv?.pause() }
+                },
+                onScrub = { pos -> scrubTargets.trySend(pos) },
+                onScrubEnd = { pos ->
                     positionMs = pos
-                    videoView?.seekTo(pos.toInt())
+                    // 最终位置也走同一条 channel：conflated 保证它替换掉所有待处理目标，
+                    // 于是它一定是最后被执行的那个 seek。
+                    scrubTargets.trySend(pos)
+                    if (resumeAfterScrub) {
+                        resumeAfterScrub = false
+                        runCatching { videoView?.start() }
+                    }
                 },
             )
         }
@@ -378,14 +427,15 @@ fun VideoPhoto(
 /**
  * 全屏预览的视频控制条（播放/暂停、进度 Slider、时间标签）。
  * 独立成组件的原因（低-19）：positionMs 每 250ms 轮询更新一次,重组只发生在这个
- * 控制条内部——播放器/静态帧/触摸层不再跟着重跑;进度拖动只在松手
- * (onValueChangeFinished) 时经 [onSeek] seekTo 一次,拖动过程中只更新时间预览,
- * 消除逐帧 seekTo 的卡顿风险。
+ * 控制条内部——播放器/静态帧/触摸层不再跟着重跑。
+ *
+ * 进度拖动实时出画面：拖动中 [onValueChange] 每次都回调 [onScrub]（由调用方做
+ * conflated + OnSeekComplete 节流的 seekTo），松手时 [onScrubEnd] 回写最终位置。
+ * [onScrubStart] 在拖动开始的那一刻调用一次（调用方据此暂停播放、松手后恢复）。
  */
 @Composable
 private fun VideoControlsBar(
     modifier: Modifier = Modifier,
-    videoView: VideoView?,
     positionMs: Long,
     durationMs: Long,
     isPlaying: Boolean,
@@ -393,10 +443,12 @@ private fun VideoControlsBar(
     chromeProgress: Float,
     chromeExitPx: Float,
     onTogglePlay: () -> Unit,
-    onSeek: (Long) -> Unit,
+    onScrubStart: () -> Unit,
+    onScrub: (Long) -> Unit,
+    onScrubEnd: (Long) -> Unit,
 ) {
     // 拖动中的本地进度:>=0 表示正在拖动,Slider 显示它而非轮询的 positionMs(拖动不抖);
-    // 松手时经 onSeek 回写并 seekTo 一次,然后复位。
+    // 松手时经 onScrubEnd 回写最终位置,然后复位。
     var dragMs by remember { mutableLongStateOf(-1L) }
     val maxDur = durationMs.coerceAtLeast(1L).toFloat()
     Row(
@@ -424,11 +476,16 @@ private fun VideoControlsBar(
         )
         Slider(
             value = (if (dragMs >= 0) dragMs else positionMs).toFloat().coerceIn(0f, maxDur),
-            onValueChange = { dragMs = it.toLong() },
+            onValueChange = { v ->
+                // dragMs < 0 = 本次手势的第一次回调 → 拖动开始（含点在轨道上直接跳）。
+                if (dragMs < 0) onScrubStart()
+                dragMs = v.toLong()
+                onScrub(dragMs)
+            },
             onValueChangeFinished = {
                 val target = dragMs
                 dragMs = -1
-                if (target >= 0) onSeek(target)
+                if (target >= 0) onScrubEnd(target)
             },
             valueRange = 0f..maxDur,
             modifier = Modifier.weight(1f).height(28.dp),
