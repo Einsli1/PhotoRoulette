@@ -152,7 +152,7 @@ private fun pageTransformOrigin(page: Page): TransformOrigin = when (page) {
     else -> TransformOrigin(0.5f, 0.5f)
 }
 
-@Composable fun PhotoRouletteApp(viewModel: PhotoViewModel, onAction: (Long, PhotoState, Int, Long) -> Boolean, onCommitDeletes: () -> Unit, onRestoreFromTrash: (List<Long>) -> Unit, openReviewRequest: Int = 0) {
+@Composable fun PhotoRouletteApp(viewModel: PhotoViewModel, onAction: (Long, PhotoState, Int, Long) -> Boolean, onCommitDeletes: () -> Unit, onRestoreFromTrash: (List<Long>) -> Unit, onMemoryDelete: (List<Long>) -> Unit, openReviewRequest: Int = 0) {
     val state by viewModel.ui.collectAsStateWithLifecycle()
     // Collected at the app level so the value is already loaded when the RecycleBin opens.
     val trashItems by viewModel.trashItems.collectAsStateWithLifecycle(emptyList())
@@ -328,6 +328,7 @@ private fun pageTransformOrigin(page: Page): TransformOrigin = when (page) {
                         onAction = onAction,
                         onCommitDeletes = onCommitDeletes,
                         onRestoreFromTrash = onRestoreFromTrash,
+                        onMemoryDelete = onMemoryDelete,
                         onNavigate = ::navigate,
                         onScan = { showPicker = true }
                     )
@@ -380,6 +381,7 @@ private fun pageTransformOrigin(page: Page): TransformOrigin = when (page) {
                             onAction = onAction,
                             onCommitDeletes = onCommitDeletes,
                             onRestoreFromTrash = onRestoreFromTrash,
+                            onMemoryDelete = onMemoryDelete,
                             onNavigate = ::navigate,
                             onScan = { showPicker = true }
                         )
@@ -406,6 +408,7 @@ private fun PageContent(
     onAction: (Long, PhotoState, Int, Long) -> Boolean,
     onCommitDeletes: () -> Unit,
     onRestoreFromTrash: (List<Long>) -> Unit,
+    onMemoryDelete: (List<Long>) -> Unit,
     onNavigate: (Page) -> Unit,
     onScan: () -> Unit,
 ) {
@@ -435,7 +438,14 @@ private fun PageContent(
                 monthDayCounts = viewModel::monthDayCounts,
             )
         }
-        Page.Memory -> MemoryViewer(state.stats.memory, onBack = { onNavigate(Page.Home) })
+        // 回忆时光机的删除与回收站同款选择模式，动作是「移入系统回收站」——URI 请求要
+        // Activity 的 contentResolver + IntentSender，所以和回收站的恢复一样由 MainActivity
+        // 提供（onMemoryDelete），ViewModel 只在系统确认后落库计统计。
+        Page.Memory -> MemoryViewer(
+            state.stats.memory,
+            onBack = { onNavigate(Page.Home) },
+            onDelete = onMemoryDelete,
+        )
         Page.Review -> {
             val session by viewModel.sessionFlow.collectAsStateWithLifecycle(initialValue = viewModel.sessionFlow.value)
             Review(session, onAction, onUndo = viewModel::undo, onDone = { onCommitDeletes() }, onBack = { onNavigate(Page.Home) })

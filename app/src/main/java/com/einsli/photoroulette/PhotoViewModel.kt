@@ -516,6 +516,23 @@ class PhotoViewModel(private val repository: PhotoRepository, private val settin
         settingsRepository.updateStatsCounters(0, -ids.size)
     }
     fun deleteFromTrash(ids: List<Long>) = viewModelScope.launch { repository.deleteFromTrash(ids) }
+
+    // ── 回忆时光机的删除:照片直接进系统回收站(与整理页左滑删除同一语义),不走整理会话 ──
+
+    /** 删除前取这些照片的存活行(拿 URI 去发系统回收站请求);已被外部删掉/已在回收站的缺席。 */
+    suspend fun photosForMemoryDelete(ids: List<Long>): List<PhotoItem> = repository.photosByIds(ids).toItems()
+
+    /** 用户在系统回收站确认后落库 + 计统计。processedAt 记成此刻:回忆时光机的删除是"这一次
+     *  处理",要进当天/本周的整理量(单列 processedAt 无法同时表达"当年保留过"和"今天删了",
+     *  已 KEEP 的照片按本次动作归账;累计计数另有一份,不受影响)。同时把这些照片从当前会话
+     *  队列里原位剔除——随机队列与回忆组可能重叠,不剔除的话整理页会对已经进回收站的照片
+     *  再删一次,累计删除被重复计入。 */
+    fun confirmDeletedFromMemory(ids: List<Long>) = viewModelScope.launch {
+        Log.d(TAG, "confirmDeletedFromMemory(${ids.size} photos)")
+        repository.confirmTrashedFromMemory(ids, System.currentTimeMillis())
+        settingsRepository.updateStatsCounters(0, ids.size)
+        resyncSession(buildVersion)
+    }
     fun reset() = viewModelScope.launch {
         repository.reset(); settingsRepository.resetStatsCounters()
         minHistoryMonthCache = null // 整理记录清空后,月历的起始月要重查

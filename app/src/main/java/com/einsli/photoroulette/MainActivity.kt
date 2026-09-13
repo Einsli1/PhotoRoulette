@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -36,7 +37,7 @@ class MainActivity : ComponentActivity() {
     // 不再在本 Activity 里各自 lazy 组装——worker 层的 ReminderScheduler 取的也是同一份。
     private val container by lazy { (application as PhotoRouletteApplication).container }
     private val viewModel by viewModels<PhotoViewModel> { PhotoViewModel.Factory(container.repository, container.settings) }
-    private enum class PendingOp { TRASH, RESTORE }
+    private enum class PendingOp { TRASH, RESTORE, MEMORY_TRASH }
     private var pendingOp: PendingOp? = null
     private var pendingIds: List<Long> = emptyList()
     // 每次"/通知点开直达整理页"请求 +1,驱动 Compose 侧重新导航(冷启动时由初始值直接落到整理页)。
@@ -53,6 +54,8 @@ class MainActivity : ComponentActivity() {
                     viewModel.nextSession()
                 }
                 PendingOp.RESTORE -> viewModel.restoreFromTrash(pendingIds)
+                // 回忆时光机的删除:系统确认后才落库 + 计统计(见 moveMemoryToTrash)。
+                PendingOp.MEMORY_TRASH -> viewModel.confirmDeletedFromMemory(pendingIds)
                 null -> {}
             }
         } else if (pendingOp == PendingOp.TRASH && pendingIds.isNotEmpty()) {
@@ -62,6 +65,8 @@ class MainActivity : ComponentActivity() {
             // made the declined photos appear to "jump away" by themselves.
             viewModel.revertPendingDeletes(pendingIds)
         }
+        // 回忆时光机(PendingOp.MEMORY_TRASH)被拒绝时无需回退:那条路径在用户确认之前
+        // 一行 DB 都没动,直接丢掉 pendingIds 即可。
         pendingOp = null
         pendingIds = emptyList()
     }
@@ -82,6 +87,7 @@ class MainActivity : ComponentActivity() {
                 onAction = { mediaId, state, dir, userTouchedAt -> viewModel.action(mediaId, state, dir, userTouchedAt) },
                 onCommitDeletes = ::movePendingToTrash,
                 onRestoreFromTrash = ::restoreFromSystemTrash,
+                onMemoryDelete = ::moveMemoryToTrash,
                 openReviewRequest = openReviewRequest.intValue
             )
         }
@@ -178,6 +184,40 @@ class MainActivity : ComponentActivity() {
         } catch (e: IllegalArgumentException) {
             // URIs rejected — clean up locally.
             viewModel.deleteFromTrash(pendingIds)
+        } catch (security: RecoverableSecurityException) {
+            deleteLauncher.launch(IntentSenderRequest.Builder(security.userAction.actionIntent.intentSender).build())
+        }
+    }
+
+    /**
+     * 回忆时光机的删除:选中的照片移入系统回收站(不是彻底删除),与整理页左滑删除同一语义。
+     * 与整理页的差别是落库时机——整理页左滑即标 DELETE_PENDING,这里在用户确认系统回收站
+     * 请求之前一行 DB 都不动(取消/杀进程都不留中间态要回退),确认后由
+     * [PhotoViewModel.confirmDeletedFromMemory] 落库并把删除张数计进累计统计。
+     */
+    private fun moveMemoryToTrash(ids: List<Long>) = lifecycleScope.launch {
+        val photos = viewModel.photosForMemoryDelete(ids)
+        if (photos.isEmpty()) return@launch
+        // 同 movePendingToTrash:逐条 contentResolver.query 是同步 binder IPC,移入 Dispatchers.IO。
+        val valid = withContext(Dispatchers.IO) {
+            photos.filter { photo ->
+                try {
+                    contentResolver.query(Uri.parse(photo.uri), null, null, null, null)?.use { it.count > 0 } ?: false
+                } catch (_: Exception) { false }
+            }
+        }
+        // 已经不在系统里的照片直接跳过:不动 DB、不计统计,下一轮对账会把它删行/标 gone。
+        if (valid.isEmpty()) return@launch
+        pendingOp = PendingOp.MEMORY_TRASH
+        pendingIds = valid.map { it.mediaId }
+        try {
+            val request = MediaStore.createTrashRequest(contentResolver, valid.map { Uri.parse(it.uri) }, true)
+            deleteLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+        } catch (e: IllegalArgumentException) {
+            // URI 被系统拒绝(上面的存在性校验之后基本不会发生):什么都不做,交给对账。
+            Log.w("MainActivity", "memory trash request rejected for ${valid.size} photos", e)
+            pendingOp = null
+            pendingIds = emptyList()
         } catch (security: RecoverableSecurityException) {
             deleteLauncher.launch(IntentSenderRequest.Builder(security.userAction.actionIntent.intentSender).build())
         }

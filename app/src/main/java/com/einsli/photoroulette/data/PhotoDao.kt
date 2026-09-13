@@ -67,7 +67,10 @@ interface PhotoDao {
     @Query("SELECT * FROM photos WHERE state IN ('UNSEEN', 'SKIP') AND inTrash = 0 AND (:minDate IS NULL OR dateTaken >= :minDate) AND (:maxDate IS NULL OR dateTaken < :maxDate) ORDER BY size DESC LIMIT :limit")
     suspend fun largestCandidates(limit: Int, minDate: Long?, maxDate: Long?): List<PhotoEntity>
 
-    @Query("SELECT * FROM photos WHERE mediaId IN (:ids) AND gone = 0")
+    // 「活着的行」:未 gone 且不在回收站。inTrash = 0 是必须的——回忆时光机的删除会把照片
+    // 直接标成 inTrash=1,若仍被会话队列取回,整理页会对着一张已经进回收站的照片再删一次
+    // (createTrashRequest 撞已回收的 URI,累计删除被重复计入)。
+    @Query("SELECT * FROM photos WHERE mediaId IN (:ids) AND gone = 0 AND inTrash = 0")
     suspend fun byIds(ids: List<Long>): List<PhotoEntity>
 
     @Query("UPDATE photos SET lastShownDay = :day WHERE mediaId IN (:ids)")
@@ -81,6 +84,12 @@ interface PhotoDao {
 
     @Query("UPDATE photos SET state = 'DELETE', inTrash = 1 WHERE mediaId IN (:ids)")
     suspend fun confirmDeleted(ids: List<Long>)
+
+    // 回忆时光机的删除:不走整理会话(没有左滑那一步),照片在系统回收站请求被确认的那一刻
+    // 直接进回收站,processedAt 一并记成 :at ——回忆时光机的删除也要进当天/本周的整理统计
+    // (回收站页排序同样按 processedAt,新删的排最前)。
+    @Query("UPDATE photos SET state = 'DELETE', inTrash = 1, processedAt = :at WHERE mediaId IN (:ids)")
+    suspend fun confirmDeletedAt(ids: List<Long>, at: Long)
 
     // Trash page order: most recently deleted first. processedAt is stamped when the user
     // swipes a photo into the delete flow (confirmDeleted flips inTrash right after), so it

@@ -112,13 +112,17 @@ class PhotoRepository(private val dao: PhotoDao, private val scanner: MediaScann
         return SessionQueue(0, photos)
     }
     suspend fun savePosition(position: Int, queueIds: List<Long>) = settings.saveQueue(queueIds, position)
-    /** 会话队列原位重算用:按 id 取仍然存在的行(gone=0),顺序由调用方自己保持。 */
-    suspend fun liveQueuePhotos(ids: List<Long>): List<PhotoEntity> = dao.byIds(ids)
+    /** 按 id 取仍然活着的行(gone=0 且不在回收站),顺序由调用方自己保持。 */
+    suspend fun photosByIds(ids: List<Long>): List<PhotoEntity> = dao.byIds(ids)
+    /** 会话队列原位重算用:按 id 取仍然存在的行,顺序由调用方自己保持。 */
+    suspend fun liveQueuePhotos(ids: List<Long>): List<PhotoEntity> = photosByIds(ids)
     /** 应用动作:只需 mediaId + 目标状态(调用方持 UI 模型,不再把实体传回数据层)。 */
     suspend fun apply(mediaId: Long, state: PhotoState) = dao.updateState(mediaId, state, if (state == PhotoState.SKIP) null else System.currentTimeMillis())
     suspend fun startNextSession() = settings.clearQueue()
     suspend fun pendingDeletes(): List<PhotoEntity> = dao.pendingDeletes()
     suspend fun confirmDeleted(ids: List<Long>) = dao.confirmDeleted(ids)
+    /** 回忆时光机的删除:系统回收站请求被确认后直接落库(不进整理会话的 DELETE_PENDING)。 */
+    suspend fun confirmTrashedFromMemory(ids: List<Long>, at: Long) = dao.confirmDeletedAt(ids, at)
     val trashItems: Flow<List<PhotoEntity>> = dao.trashItems()
     suspend fun trashList(): List<PhotoEntity> = dao.trashNow()
     suspend fun restoreFromTrash(ids: List<Long>) = dao.restoreFromTrash(ids)

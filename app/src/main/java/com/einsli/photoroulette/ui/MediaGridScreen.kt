@@ -62,15 +62,20 @@ import com.einsli.photoroulette.model.PhotoItem
 
 /**
  * 选择模式配置：非 null 时为宫格页启用长按多选 + 右下角选择圈 + 头部选择条
- * （X / 已选择N项 / 全选）+ 底部恢复·删除胶囊，并给全屏预览挂上单张「恢复/删除」胶囊
+ * （X / 已选择N项 / 全选）+ 底部动作胶囊，并给全屏预览挂上单张动作胶囊
  * （同一套动作）。
  *
- * [onRestore] / [onDelete] 在用户确认动作时由页面调用，动作固定为回收站的恢复/彻底删除
- * 语义；异步由实现方自理——ViewModel 内部自启 coroutine，页面不再额外包装。
+ * [onDelete] 在用户确认动作时由页面调用，两个页面的「删除」语义不同但都从这一路走：
+ * 回收站 = 彻底删除，回忆时光机 = 移入系统回收站（URI 请求由实现方自理的异步流程处理）。
+ *
+ * [onRestore] 只在有「恢复」语义的页面给（回收站）：为 null 时动作胶囊只显示删除
+ * （回忆时光机没有恢复可言），样式与回收站完全一致，只是少一颗按钮。
+ *
+ * 异步由实现方自理——ViewModel 内部自启 coroutine，页面不再额外包装。
  */
 internal class MediaGridSelection(
-    val onRestore: (List<Long>) -> Unit,
     val onDelete: (List<Long>) -> Unit,
+    val onRestore: ((List<Long>) -> Unit)? = null,
 )
 
 /** 宫格选择模式的选中标识色（设计图用 MIUI 蓝）。 */
@@ -113,7 +118,7 @@ internal fun MediaGridScreen(
     thumbDecodeScale: Float = 1f,
     /** 是否显示右缘滚动条（回收站 true；选择模式下自动改为非交互）。 */
     scrollBar: Boolean = false,
-    /** 选择模式配置，null = 不启用（回忆时光机）。 */
+    /** 选择模式配置，null = 不启用。回收站（恢复/彻底删除）与回忆时光机（移入回收站）共用。 */
     selection: MediaGridSelection? = null,
     /** 普通模式头部内容。参数 = 进入选择模式的回调（未启用选择模式时为 null）。
      *  选择模式下的头部（X/已选择N项/全选）由本组件内置，与普通模式头部互斥。 */
@@ -430,7 +435,9 @@ internal fun MediaGridScreen(
                         }
                     }
                     // ── 选择模式的底部居中悬浮深色胶囊：恢复 / 删除（图标上、文字下）。
+                    //    没有恢复语义的页面（回忆时光机）只出删除一颗，样式不变。
                     if (selectionCfg != null && selectionActive) {
+                        val ids = selected.toList()
                         Box(
                             Modifier
                                 .align(Alignment.BottomCenter)
@@ -440,14 +447,14 @@ internal fun MediaGridScreen(
                             MediaActionPill(
                                 restoreEnabled = selected.isNotEmpty(),
                                 deleteEnabled = selected.isNotEmpty(),
-                                onRestore = {
-                                    val ids = selected.toList()
-                                    selectMode = false
-                                    selected = emptySet()
-                                    selectionCfg.onRestore(ids)
+                                onRestore = selectionCfg.onRestore?.let { restore ->
+                                    {
+                                        selectMode = false
+                                        selected = emptySet()
+                                        restore(ids)
+                                    }
                                 },
                                 onDelete = {
-                                    val ids = selected.toList()
                                     selectMode = false
                                     selected = emptySet()
                                     selectionCfg.onDelete(ids)
@@ -471,8 +478,9 @@ internal fun MediaGridScreen(
                 label = "${dummyKeyPrefix}Preview",
             ) {
                 if (previewSession > 0) {
-                    // 选择模式启用时给预览挂单张「恢复/删除」胶囊（设计图底部动作）：
-                    // 照片即将从列表消失，先 bump 会话号直接销毁预览（不飞行回位）再执行动作。
+                    // 选择模式启用时给预览挂单张动作胶囊（设计图底部动作）：照片即将从列表
+                    // 消失，先 bump 会话号直接销毁预览（不飞行回位）再执行动作。没有恢复语义
+                    // 的页面（回忆时光机）只出删除一颗。
                     val previewActions: (@Composable (current: PhotoItem) -> Unit)? =
                         if (selectionCfg != null) {
                             { current ->
@@ -480,7 +488,9 @@ internal fun MediaGridScreen(
                                     MediaActionPill(
                                         restoreEnabled = true,
                                         deleteEnabled = true,
-                                        onRestore = { destroyPreview(); selectionCfg.onRestore(listOf(current.mediaId)) },
+                                        onRestore = selectionCfg.onRestore?.let { restore ->
+                                            { destroyPreview(); restore(listOf(current.mediaId)) }
+                                        },
                                         onDelete = { destroyPreview(); selectionCfg.onDelete(listOf(current.mediaId)) },
                                     )
                                 }
@@ -594,12 +604,13 @@ private fun GridVideoBadge(photo: PhotoItem, modifier: Modifier = Modifier) {
 }
 
 /** 设计图同款深色胶囊动作条（半透明黑、大圆角）：图标在上、文字在下。
- *  宫格选择模式的底部悬浮条与全屏预览的底部动作共用（恢复/删除语义）。 */
+ *  宫格选择模式的底部悬浮条与全屏预览的底部动作共用。
+ *  [onRestore] 为 null 时只渲染删除一颗（回忆时光机没有恢复语义），胶囊样式不变。 */
 @Composable
 private fun MediaActionPill(
     restoreEnabled: Boolean,
     deleteEnabled: Boolean,
-    onRestore: () -> Unit,
+    onRestore: (() -> Unit)?,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -610,7 +621,9 @@ private fun MediaActionPill(
             .padding(horizontal = 36.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(44.dp),
     ) {
-        MediaPillAction(Icons.AutoMirrored.Filled.Redo, "恢复", restoreEnabled, onRestore)
+        if (onRestore != null) {
+            MediaPillAction(Icons.AutoMirrored.Filled.Redo, "恢复", restoreEnabled, onRestore)
+        }
         MediaPillAction(Icons.Outlined.Delete, "删除", deleteEnabled, onDelete)
     }
 }
