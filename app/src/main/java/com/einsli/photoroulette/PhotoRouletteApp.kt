@@ -3,8 +3,8 @@ package com.einsli.photoroulette
 import android.app.Application
 import coil.ImageLoader
 import coil.ImageLoaderFactory
-import coil.decode.VideoFrameDecoder
 import coil.memory.MemoryCache
+import com.einsli.photoroulette.media.GatedVideoFrameDecoder
 
 /** 全局图片加载器（进程唯一；Coil 在首次请求图片时才懒构建本单例）：内存缓存提到
  *  40% 堆上限（默认 25%），配合缩略图降采样，让宫格预载窗口内及浏览过的缩略图常驻
@@ -20,7 +20,10 @@ class PhotoRouletteApp : Application(), ImageLoaderFactory {
 
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
-            .components { add(VideoFrameDecoder.Factory()) }
+            // GatedVideoFrameDecoder.Factory 内部就是 VideoFrameDecoder.Factory + 并发闸门
+            // （见该类注释：几十个视频抽帧撞 mediaserver 名额会导致宫格随机黑格）。别再额外
+            // add(VideoFrameDecoder.Factory())——两个都注册时前者先命中，后者成了死代码。
+            .components { add(GatedVideoFrameDecoder.Factory()) }
             .memoryCache {
                 // 用 Runtime.maxMemory 计算（感知 largeHeap），而不是 memoryClass。
                 MemoryCache.Builder(this)

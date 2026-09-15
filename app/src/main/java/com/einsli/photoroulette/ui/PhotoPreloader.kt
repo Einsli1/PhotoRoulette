@@ -10,7 +10,6 @@ import androidx.compose.ui.platform.LocalContext
 import coil.imageLoader
 import coil.request.Disposable
 import coil.request.ImageRequest
-import coil.request.videoFrameMillis
 import coil.size.Size as CoilSize
 import com.einsli.photoroulette.model.PhotoItem
 import kotlinx.coroutines.delay
@@ -23,6 +22,13 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 // 1..4999 不产生任何预载；fling 停稳（settle）并经过一小段防抖后，才围绕停稳位置
 // （如可见 5000..5020）铺 4970..5050 这一圈。滚动条快速拖拽的中间位置同样被防抖吞掉。
 // 可见区域 + 上方少量 + 下方少量 = 窗口；窗口大小固定，不随滚动历史增长（无 frontier）。
+//
+// 视频**不预载**（2026-09-15 真机实测后加的）：视频缩略图是「抽一帧」，一次要占一个
+// MediaMetadataRetriever（走 VideoDecodeGate 的并发闸门，见该类注释），解码成本是图片的
+// 几十倍。窗口是可见区 ±30 项，全视频的一屏（~28 格）就会往里塞 ~88 个抽帧请求，在 3 个
+// 名额的闸门后面排长队——实测冷启动时队尾要等 13.2 秒，而用户滑走时这些请求又会被取消，
+// 纯属无用功，还挤占了可见格子的名额。现在预载只铺图片（图片解码快、不限并发），视频交给
+// 可见格子自己的组合期请求按需抽帧；请求参数与预载完全一致，缓存命中路径不变。
 internal const val GRID_PRELOAD_MARGIN_ITEMS = 30
 internal const val GRID_PRELOAD_SETTLE_DEBOUNCE_MS = 150L
 
@@ -42,11 +48,12 @@ internal fun GridWindowedThumbnailPreload(gridState: LazyGridState, photos: List
         fun enqueue(index: Int) {
             if (index in tracked) return
             val photo = photos.getOrNull(index) ?: return
+            // 视频不预载（见文件头注释）：抽帧贵且要抢系统取帧名额，交给可见格子按需请求。
+            if (photo.mimeType.startsWith("video/")) return
             tracked[index] = loader.enqueue(
                 ImageRequest.Builder(context)
                     .data(photo.uri)
                     .size(size)
-                    .apply { if (photo.mimeType.startsWith("video/")) videoFrameMillis(1000) }
                     .build()
             )
         }
