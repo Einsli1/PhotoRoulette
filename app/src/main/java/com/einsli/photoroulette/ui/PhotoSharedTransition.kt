@@ -374,7 +374,15 @@ fun SharedTransitionScope.SharedPhotoPreview(
     val pagerState = rememberPagerState(
         initialPage = initialIndex.coerceIn(0, (openPhotos.size - 1).coerceAtLeast(0)),
     ) { openPhotos.size.coerceAtLeast(1) }
-    val currentPhoto = openPhotos.getOrNull(pagerState.currentPage) ?: return
+    // 预览内删除/恢复后列表会变短：此时 pagerState.currentPage 可能暂时越界（被删掉的那一页），
+    // 而「越界页」的收敛只发生在测量里（PagerMeasure 把 firstVisiblePage >= pageCount 收成
+    // pageCount-1，PagerState.currentPage 才会跟着回落到最后一张）。所以这里**不能**直接
+    // `?: return`：早退会让 pager 整帧不进组合 → 永远不测量 → currentPage 永远越界 →
+    // 预览卡在空屏。改成按合法范围取「当前照片」照常渲染，pager 照常测量，下一帧自己收敛。
+    // 顺带：删的是中间某张时 currentPage 仍合法，列表左移一位，预览原地就是下一张。
+    val currentPhoto = openPhotos.getOrNull(
+        pagerState.currentPage.coerceIn(0, openPhotos.lastIndex.coerceAtLeast(0))
+    ) ?: return
     val context = LocalContext.current
     var dragY by remember { mutableFloatStateOf(0f) }
     // 下滑提交式关闭:照片从松手位置顺势滑出屏幕底部。
@@ -604,7 +612,9 @@ fun SharedTransitionScope.SharedPhotoPreview(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
             ) { page ->
-                val p = openPhotos[page]
+                // getOrNull + 早退：预览内删除会把列表改短，极端时序下可能出现「上一帧的组合
+                // 仍在、索引已越界」的一帧，直接用 [] 取会 IndexOutOfBounds 崩掉预览。
+                val p = openPhotos.getOrNull(page) ?: return@HorizontalPager
                 // The preview's placeholder is the source cell thumbnail (same key as the grid
                 // side), so the first open shows it instantly while the full-screen copy decodes.
                 val placeholder = remember(p.mediaId, sourceThumbSize) {
@@ -667,7 +677,9 @@ fun SharedTransitionScope.SharedPhotoPreview(
                         modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                     )
                     Text(
-                        "${pagerState.currentPage + 1}/${openPhotos.size}",
+                        // 列表刚变短的那一帧 currentPage 还可能越界（见 currentPhoto 的注释），
+                        // 页码先按合法范围夹一下，避免闪出「6/5」。
+                        "${(pagerState.currentPage + 1).coerceAtMost(openPhotos.size)}/${openPhotos.size}",
                         color = Color.White.copy(alpha = 0.7f),
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(end = 8.dp),

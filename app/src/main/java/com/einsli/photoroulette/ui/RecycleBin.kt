@@ -53,10 +53,12 @@ internal fun RecycleBin(
         thumbDecodeScale = 0.7f,
         dummyKeyPrefix = "trash",
         scrollBar = true,
-        // 选择模式：恢复走 App 的 onRestore，彻底删除走 ViewModel（各自内部自启协程）。
+        // 选择模式：恢复走 App 的 onRestore，彻底删除走 ViewModel（各自内部自启协程，页面
+        // 不再包装）。彻底删除不可撤销，confirmDelete=true → 宫格/预览的删除都先弹确认框。
         selection = MediaGridSelection(
             onRestore = onRestore,
             onDelete = { ids -> viewModel.deleteFromTrash(ids) },
+            confirmDelete = true,
         ),
         // 悬浮头部：返回‹ + 「回收站/总容量」 + 垃圾桶(进选择模式)。
         headerContent = { enterSelection ->

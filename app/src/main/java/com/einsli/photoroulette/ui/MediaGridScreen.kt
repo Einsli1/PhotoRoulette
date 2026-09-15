@@ -33,9 +33,11 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,11 +73,15 @@ import com.einsli.photoroulette.model.PhotoItem
  * [onRestore] 只在有「恢复」语义的页面给（回收站）：为 null 时动作胶囊只显示删除
  * （回忆时光机没有恢复可言），样式与回收站完全一致，只是少一颗按钮。
  *
+ * [confirmDelete] = 删除前是否弹 App 内确认框：回收站的「彻底删除」不可撤销 → true；
+ * 回忆时光机的删除本来就走系统回收站确认弹窗 → false，不再二次确认。
+ *
  * 异步由实现方自理——ViewModel 内部自启 coroutine，页面不再额外包装。
  */
 internal class MediaGridSelection(
     val onDelete: (List<Long>) -> Unit,
     val onRestore: ((List<Long>) -> Unit)? = null,
+    val confirmDelete: Boolean = false,
 )
 
 /** 宫格选择模式的选中标识色（设计图用 MIUI 蓝）。 */
@@ -136,8 +142,13 @@ internal fun MediaGridScreen(
     // selectionCfg == null 时 selectMode/selected 恒为 false/空，selectionActive 恒为 false。
     val selectionActive = selectMode || selected.isNotEmpty()
     val selecting = selectionCfg != null && selectionActive
+    // 本次预览的初始页（打开时点的那张：共享 key 基准 + pager 初始页）。
     var previewIndex by remember { mutableIntStateOf(-1) }
-    val previewOpen = previewIndex in photos.indices
+    // 「预览是否打开」刻意是独立状态，不写成 `previewIndex in photos.indices`：全屏预览里
+    // 删除会让照片从列表消失，用索引判断的话「删掉打开时那张或它后面的照片」会把整个预览
+    // 关掉退回宫格——而用户要的是留在预览里接着看下一张（列表被删空时才收尾关闭，见下方
+    // LaunchedEffect(photos.isEmpty())）。
+    var previewOpen by remember { mutableStateOf(false) }
     // 预览会话号：每次打开 +1。用它给预览内容做 key —— 关闭时 key 不变，预览内容在
     // AnimatedVisibility 退出期间保持合成（shared element 才能连续飞回宫格）；再次打开时
     // key 变化，预览以「本次点击的照片」为初始页全新合成。恢复/删除按钮 +1 则直接销毁
@@ -171,6 +182,19 @@ internal fun MediaGridScreen(
         previewVisible = false
         previewSession++
         previewIndex = -1
+        previewOpen = false
+    }
+    // 预览里把列表删空（回忆时光机删完最后一组 / 回收站清空）→ 没有可看的照片了，收尾关闭；
+    // 否则 pager 没有内容、预览会停在空屏上。
+    LaunchedEffect(photos.isEmpty(), previewOpen) {
+        if (previewOpen && photos.isEmpty()) destroyPreview()
+    }
+    // 删除动作的入口：需要 App 内二次确认的页面（回收站「彻底删除」不可撤销）先弹确认框，
+    // 确认后才真的执行；回忆时光机的删除本来就有系统回收站弹窗，不再二次确认。
+    var pendingDelete by remember { mutableStateOf<List<Long>?>(null) }
+    fun requestDelete(ids: List<Long>) {
+        val cfg = selectionCfg ?: return
+        if (cfg.confirmDelete) pendingDelete = ids else cfg.onDelete(ids)
     }
     // Page-level back returns to the parent page. While the preview is open, SharedPhotoPreview's
     // own BackHandler (composed later) wins and closes the preview first.
@@ -299,6 +323,7 @@ internal fun MediaGridScreen(
                                                             closing = false
                                                             previewSettled = false
                                                             previewIndex = index
+                                                            previewOpen = true
                                                         },
                                                         onLongPress = if (selectionCfg != null) {
                                                             {
@@ -457,7 +482,7 @@ internal fun MediaGridScreen(
                                 onDelete = {
                                     selectMode = false
                                     selected = emptySet()
-                                    selectionCfg.onDelete(ids)
+                                    requestDelete(ids)
                                 },
                             )
                         }
@@ -478,9 +503,11 @@ internal fun MediaGridScreen(
                 label = "${dummyKeyPrefix}Preview",
             ) {
                 if (previewSession > 0) {
-                    // 选择模式启用时给预览挂单张动作胶囊（设计图底部动作）：照片即将从列表
-                    // 消失，先 bump 会话号直接销毁预览（不飞行回位）再执行动作。没有恢复语义
-                    // 的页面（回忆时光机）只出删除一颗。
+                    // 选择模式启用时给预览挂单张动作胶囊（设计图底部动作）。删除/恢复都**不**
+                    // 退出预览：恢复与删除都会让照片从列表里消失，预览原地接着显示下一张
+                    // （pager 索引不变、列表左移一位；停在被删掉的最后一页时由
+                    // SharedPhotoPreview 按合法范围收敛）。没有恢复语义的页面（回忆时光机）
+                    // 只出删除一颗。
                     val previewActions: (@Composable (current: PhotoItem) -> Unit)? =
                         if (selectionCfg != null) {
                             { current ->
@@ -489,9 +516,9 @@ internal fun MediaGridScreen(
                                         restoreEnabled = true,
                                         deleteEnabled = true,
                                         onRestore = selectionCfg.onRestore?.let { restore ->
-                                            { destroyPreview(); restore(listOf(current.mediaId)) }
+                                            { restore(listOf(current.mediaId)) }
                                         },
-                                        onDelete = { destroyPreview(); selectionCfg.onDelete(listOf(current.mediaId)) },
+                                        onDelete = { requestDelete(listOf(current.mediaId)) },
                                     )
                                 }
                             }
@@ -528,11 +555,35 @@ internal fun MediaGridScreen(
                                     if (idx >= 0) revealGridItemIfOffscreen(gridState, idx)
                                 }
                                 previewIndex = -1
+                                previewOpen = false
                             }
                         },
                         bottomControls = previewActions,
                     )
                 }
+            }
+            // ── 彻底删除确认弹窗（回收站）：不可撤销的破坏性动作，先问一句再动手。回忆时光机
+            //    的删除本来就有系统回收站弹窗，confirmDelete=false，永远走不到这里。 ──
+            val deleting = pendingDelete
+            if (deleting != null) {
+                val dc = designColors()
+                AlertDialog(
+                    onDismissRequest = { pendingDelete = null },
+                    containerColor = dc.card,
+                    titleContentColor = dc.ink,
+                    textContentColor = dc.slate,
+                    title = { Text("彻底删除这些照片？") },
+                    text = { Text("将彻底删除 ${deleting.size} 张照片，此操作无法撤销。") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            pendingDelete = null
+                            selectionCfg?.onDelete?.invoke(deleting)
+                        }) { Text("删除", color = dc.danger) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingDelete = null }) { Text("取消", color = dc.accentText) }
+                    },
+                )
             }
         }
     }
