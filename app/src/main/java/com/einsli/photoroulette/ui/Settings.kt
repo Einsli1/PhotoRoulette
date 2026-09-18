@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.state.ToggleableState
@@ -471,12 +472,16 @@ private fun SettingTimeWheel(
     // 半选态也应补齐而不是“反转成空”，所以判据是「是否已全选」而非当前勾选值。
     val toggleAll = { selected = if (allSelected) emptySet() else albums.toSet() }
 
+    // 弹窗窗口的高度是 wrap_content：不显式给上限时 Card 会被量到内容全高，相册一多就把底部
+    // 「全选/取消/确定」那一行挤出屏幕（真机实测 14 个相册时三个按钮 bounds 全为 [0,0][0,0]）。
+    // 卡死上限后 Column 拿到有界约束，列表 weight(1f, fill=false) 才会滚动，底部一行永远在屏内。
+    val maxCardHeight = (LocalConfiguration.current.screenHeightDp * 0.8f).dp
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Card(
             shape = RoundedCornerShape(26.dp),
             colors = CardDefaults.cardColors(containerColor = dc.card),
             elevation = CardDefaults.cardElevation(0.dp),
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(max = maxCardHeight).padding(horizontal = 20.dp),
         ) {
             Text(
                 "选择要扫描的相册",
@@ -507,7 +512,7 @@ private fun SettingTimeWheel(
                                 .padding(horizontal = 8.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            PlCheckbox(checked = checked)
+                            PlCheckbox(checked = if (checked) ToggleableState.On else ToggleableState.Off)
                             Spacer(Modifier.width(18.dp))
                             Text(a, fontSize = 15.sp, color = dc.ink)
                         }
@@ -522,7 +527,7 @@ private fun SettingTimeWheel(
                     Modifier
                         .clip(RoundedCornerShape(10.dp))
                         .toggleable(
-                            value = groupState,
+                            value = allSelected,
                             role = Role.Checkbox,
                             onValueChange = { toggleAll() },
                         )
