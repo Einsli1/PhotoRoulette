@@ -1,6 +1,8 @@
 package com.einsli.photoroulette.ui
 
 // 设置页（Settings）：外观/数量/提醒/范围/策略/内容等设置项、行组件与相册选择弹窗（AlbumsPicker）。
+// 相册弹窗按设计图（选择要扫描的相册：标题 + 相册勾选列表 + 底部「全选/取消/确定」一行）自绘 Dialog，
+// 而非 AlertDialog——M3 的 AlertDialog 按钮槽只能放尾部胶囊，塞不下左对齐的「全选」。
 import android.Manifest
 import android.app.AlarmManager
 import android.content.Intent
@@ -11,9 +13,11 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -24,11 +28,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -443,26 +452,128 @@ private fun SettingTimeWheel(
     }
 }
 
+/** 设置页的相册勾选弹窗（设计图：选择要扫描的相册.png）。
+ *
+ *  布局自上而下：标题 → 可滚动的相册勾选列表 → 底部一行「全选 + 取消 + 确定」。
+ *  底部「全选」是列表的全选/取消全选开关：勾选态由已选项推导（全选=勾、一个都没选=空、
+ *  部分选中=半选态），点一下按「是否已全选」整批开或关，而不是无脑反转（半选时也应补齐）。 */
 @Composable internal fun AlbumsPicker(viewModel: PhotoViewModel, settings: com.einsli.photoroulette.data.AppSettings, onClose: () -> Unit) {
+    val dc = designColors()
     var albums by remember { mutableStateOf<List<String>>(emptyList()) }
     var selected by remember { mutableStateOf(settings.includedAlbums.toSet()) }
     LaunchedEffect(Unit) { albums = viewModel.availableAlbums() }
-    AlertDialog(onDismissRequest = onClose, title = { Text("选择要扫描的相册") }, text = {
-        if (albums.isEmpty()) Text("未发现相册") else {
-            androidx.compose.foundation.lazy.LazyColumn { items(albums) { a ->
-                val checked = selected.contains(a)
-                Row(Modifier.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = checked, onCheckedChange = { c -> selected = if (c) selected + a else selected - a })
-                    Spacer(Modifier.width(8.dp))
-                    Text(a)
+    val allSelected = albums.isNotEmpty() && selected.containsAll(albums)
+    val groupState = when {
+        allSelected -> ToggleableState.On
+        albums.none { selected.contains(it) } -> ToggleableState.Off
+        else -> ToggleableState.Indeterminate
+    }
+    // 半选态也应补齐而不是“反转成空”，所以判据是「是否已全选」而非当前勾选值。
+    val toggleAll = { selected = if (allSelected) emptySet() else albums.toSet() }
+
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Card(
+            shape = RoundedCornerShape(26.dp),
+            colors = CardDefaults.cardColors(containerColor = dc.card),
+            elevation = CardDefaults.cardElevation(0.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+        ) {
+            Text(
+                "选择要扫描的相册",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = dc.ink,
+                modifier = Modifier.padding(start = 20.dp, top = 22.dp, end = 20.dp, bottom = 6.dp),
+            )
+            // 列表吃掉卡片剩余高度（weight）：相册多时能滚到「DCIM/」，相册少时卡片自然收短，
+            // 任何屏幕高度下底部那一行都在卡片内、不会被挤出去。
+            if (albums.isEmpty()) {
+                Text("未发现相册", fontSize = 14.sp, color = dc.slate, modifier = Modifier.padding(20.dp))
+            } else {
+                androidx.compose.foundation.lazy.LazyColumn(Modifier.weight(1f, fill = false).padding(horizontal = 12.dp)) {
+                    items(albums) { a ->
+                        val checked = selected.contains(a)
+                        // 整行可点：勾选框与目录名同属一个开关，不用瞄准 16dp 的小方块。
+                        // vertical 12dp + 16dp 勾选框 ≈ 行高 45dp，与设计图的行距一致（不加行间分隔线）。
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .toggleable(
+                                    value = checked,
+                                    role = Role.Checkbox,
+                                    onValueChange = { c -> selected = if (c) selected + a else selected - a },
+                                )
+                                .padding(horizontal = 8.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            PlCheckbox(checked = checked)
+                            Spacer(Modifier.width(18.dp))
+                            Text(a, fontSize = 15.sp, color = dc.ink)
+                        }
+                    }
                 }
-            } }
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 8.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .toggleable(
+                            value = groupState,
+                            role = Role.Checkbox,
+                            onValueChange = { toggleAll() },
+                        )
+                        .padding(horizontal = 2.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    PlCheckbox(checked = groupState)
+                    Spacer(Modifier.width(18.dp))
+                    Text("全选", fontSize = 15.sp, color = dc.ink)
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onClose,
+                    modifier = Modifier.widthIn(min = 64.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                ) { Text("取消", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = dc.accentText) }
+                TextButton(
+                    onClick = {
+                        // Save the selection and rescan — updates the photo total only, keeps records.
+                        viewModel.updateAlbums(selected.toList())
+                        onClose()
+                    },
+                    modifier = Modifier.widthIn(min = 64.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                ) { Text("确定", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = dc.accentText) }
+            }
         }
-    }, confirmButton = {
-        TextButton(onClick = {
-            // Save the selection and rescan — updates the photo total only, keeps records.
-            viewModel.updateAlbums(selected.toList())
-            onClose()
-        }) { Text("确定") }
-    }, dismissButton = { TextButton(onClick = onClose) { Text("取消") } })
+    }
+}
+
+/** 小号圆角勾选框，尺寸/圆角/对勾粗细取自设计图（44px @2.75x ≈ 16dp）。三态：
+ *  勾选 = 品牌色实底 + 白色对勾；半选 = 品牌色实底 + 白色横杠；未选 = 透明底 + 细描边。
+ *  自身不可点——点击交给外层整行 [toggleable]，避免行与方块两处手势打架。 */
+@Composable
+private fun PlCheckbox(checked: ToggleableState, modifier: Modifier = Modifier) {
+    val dc = designColors()
+    val on = checked != ToggleableState.Off
+    Box(
+        modifier
+            .size(16.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(if (on) dc.accent else Color.Transparent)
+            .border(1.5.dp, if (on) dc.accent else dc.labelGray.copy(alpha = 0.7f), RoundedCornerShape(4.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        when (checked) {
+            ToggleableState.On -> Icon(Icons.Default.Check, null, tint = Color.White, modifier = Modifier.size(11.dp))
+            ToggleableState.Indeterminate -> Box(
+                Modifier.width(8.dp).height(2.dp).clip(RoundedCornerShape(1.dp)).background(Color.White)
+            )
+            ToggleableState.Off -> Unit
+        }
+    }
 }
